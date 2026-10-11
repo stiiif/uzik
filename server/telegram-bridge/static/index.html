@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Telegram bridge</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-900 text-slate-100 min-h-screen p-6 pb-32">
+<div class="max-w-4xl mx-auto space-y-6">
+  <header class="flex flex-wrap items-end gap-3">
+    <div class="flex-1 min-w-0">
+      <h1 class="text-2xl font-bold">Telegram bridge</h1>
+      <p id="statusLine" class="text-sm text-slate-400"></p>
+    </div>
+    <button id="refreshAllBtn" class="hidden px-3 py-2 bg-slate-700 rounded text-sm">Refresh all now</button>
+  </header>
+
+  <p id="msg" class="text-red-400 text-sm"></p>
+
+  <!-- Token -->
+  <section id="tokenBox" class="hidden space-y-3 bg-slate-800 p-4 rounded-lg">
+    <p class="text-sm">Enter the sync token (the <code>SYNC_TOKEN</code> value in docker-compose.yml).</p>
+    <div class="flex gap-2">
+      <input id="tokenInput" type="password" class="flex-1 p-2 rounded bg-slate-700">
+      <button id="tokenSave" class="px-4 py-2 bg-blue-600 rounded">Save token</button>
+    </div>
+  </section>
+
+  <!-- Telegram login -->
+  <section id="login" class="hidden space-y-3 bg-slate-800 p-4 rounded-lg">
+    <p class="text-sm">Sign in to Telegram once. The code arrives in your Telegram app.</p>
+    <input id="phone" placeholder="+33612345678" class="w-full p-2 rounded bg-slate-700">
+    <button id="sendCode" class="px-4 py-2 bg-blue-600 rounded">Send code</button>
+    <div id="codeBox" class="hidden space-y-3">
+      <input id="code" placeholder="Login code" class="w-full p-2 rounded bg-slate-700">
+      <input id="pwd" type="password" placeholder="2FA password (if you have one)" class="w-full p-2 rounded bg-slate-700">
+      <button id="signIn" class="px-4 py-2 bg-green-600 rounded">Sign in</button>
+    </div>
+  </section>
+
+  <!-- Channels -->
+  <section id="channelsBox" class="hidden space-y-3">
+    <div class="flex items-center gap-3">
+      <h2 class="text-lg font-semibold flex-1">Channels</h2>
+      <input id="chFilter" placeholder="Find a channel" class="p-2 rounded bg-slate-800 text-sm w-56">
+    </div>
+    <p class="text-sm text-slate-400">Ticked channels are scanned, refreshed automatically and shared with Uzikext.</p>
+    <ul id="channelList" class="bg-slate-800 rounded-lg divide-y divide-slate-700"></ul>
+  </section>
+
+  <!-- Browse -->
+  <section id="browseBox" class="hidden space-y-4">
+    <h2 class="text-lg font-semibold">Browse</h2>
+    <div class="flex flex-wrap gap-2">
+      <select id="browseCh" class="p-2 rounded bg-slate-800"></select>
+      <input id="q" placeholder="Search" class="flex-1 min-w-40 p-2 rounded bg-slate-800">
+      <select id="field" class="p-2 rounded bg-slate-800">
+        <option value="all">All fields</option>
+        <option value="track">Track</option>
+        <option value="album">Album</option>
+        <option value="artist">Artist</option>
+      </select>
+      <button id="searchBtn" class="px-4 py-2 bg-blue-600 rounded">Search</button>
+    </div>
+    <div class="flex items-center gap-3 text-xs text-slate-400">
+      <span id="info" class="flex-1"></span>
+      <label class="flex items-center gap-1"><input type="checkbox" id="hq"> Hide MP3 &lt; 320 kbps</label>
+    </div>
+    <div id="results" class="space-y-4"></div>
+  </section>
+</div>
+
+<div id="player" class="hidden fixed bottom-0 inset-x-0 bg-slate-800 border-t border-slate-700 p-3">
+  <div class="max-w-4xl mx-auto flex items-center gap-3">
+    <button id="prevBtn" class="px-2 text-lg" title="Previous">⏮</button>
+    <div class="flex-1 min-w-0">
+      <div id="nowPlaying" class="text-sm truncate"></div>
+      <audio id="audio" controls class="w-full h-8 mt-1"></audio>
+    </div>
+    <button id="nextBtn" class="px-2 text-lg" title="Next">⏭</button>
+    <button id="closeBtn" class="px-2 text-lg" title="Close">✕</button>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const fmtMB = b => (b / 1048576).toFixed(1) + " MB";
+const fmtTime = iso => iso ? new Date(iso).toLocaleString() : "never";
+
+// ---------- token + API ----------
+let token = "";
+try { token = localStorage.getItem("bridgeToken") || ""; } catch (e) {}
+const withToken = url => token ? url + (url.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(token) : url;
+
+class Unauthorized extends Error {}
+async function api(url, body) {
+  const opts = { headers: {} };
+  if (token) opts.headers.Authorization = "Bearer " + token;
+  if (body !== undefined) {
+    opts.method = "POST";
+    opts.headers["Content-Type"] = "application/json";
+    opts.body = JSON.stringify(body);
+  }
+  const r = await fetch(url, opts);
+  if (r.status === 401) throw new Unauthorized();
+  if (!r.ok) throw new Error((await r.text()) || "HTTP " + r.status);
+  return r.json();
+}
+function fail(e) {
+  if (e instanceof Unauthorized) { $("tokenBox").classList.remove("hidden"); return; }
+  $("msg").textContent = e.message;
+}
+
+$("tokenSave").onclick = () => {
+  token = $("tokenInput").value.trim();
+  try { localStorage.setItem("bridgeToken", token); } catch (e) {}
+  $("tokenBox").classList.add("hidden");
+  $("msg").textContent = "";
+  boot();
+};
+
+// ---------- boot ----------
+let status = null;
+async function boot() {
+  try {
+    status = await api("/api/status");
+    renderStatus(status.sched);
+    if (!status.authorized) { $("login").classList.remove("hidden"); return; }
+    $("login").classList.add("hidden");
+    ["channelsBox", "browseBox", "refreshAllBtn"].forEach(id => $(id).classList.remove("hidden"));
+    await loadChannels();
+    poll();
+  } catch (e) { fail(e); }
+}
+
+function renderStatus(sched) {
+  if (!status) return;
+  const parts = [];
+  if (status.me) parts.push(`Signed in as ${status.me}.`);
+  if (status.authorized) {
+    parts.push(`Refreshes every ${status.refreshMinutes} min.`);
+    if (sched.running) parts.push("Refreshing now.");
+    else parts.push(`Last refresh ${fmtTime(sched.last_run)}.`);
+  }
+  $("statusLine").textContent = parts.join(" ");
+}
+
+$("sendCode").onclick = async () => {
+  try { await api("/api/send_code", { phone: $("phone").value }); $("codeBox").classList.remove("hidden"); }
+  catch (e) { fail(e); }
+};
+$("signIn").onclick = async () => {
+  try {
+    const r = await api("/api/sign_in", { phone: $("phone").value, code: $("code").value, password: $("pwd").value || null });
+    if (r.need_password) { $("msg").textContent = "This account has a 2FA password. Enter it and sign in again."; return; }
+    $("msg").textContent = "";
+    boot();
+  } catch (e) { fail(e); }
+};
+$("refreshAllBtn").onclick = async () => {
+  try { await api("/api/refresh_all", {}); poll(); } catch (e) { fail(e); }
+};
+
+// ---------- channels ----------
+let allChannels = [], chTitles = {}, chUsers = {};
+async function loadChannels() {
+  allChannels = await api("/api/channels");
+  chTitles = Object.fromEntries(allChannels.map(c => [c.id, c.title]));
+  chUsers = Object.fromEntries(allChannels.map(c => [c.id, c.username]));
+  renderChannels();
+  renderBrowseSelect();
+}
+
+function renderChannels() {
+  const f = $("chFilter").value.trim().toLowerCase();
+  const list = allChannels.filter(c => !f || c.title.toLowerCase().includes(f));
+  $("channelList").innerHTML = list.length ? list.map(c => `
+    <li class="flex items-center gap-3 px-4 py-3" data-ch="${c.id}">
+      <input type="checkbox" class="pick w-4 h-4" ${c.selected ? "checked" : ""} aria-label="Include ${esc(c.title)}">
+      <div class="flex-1 min-w-0">
+        <div class="truncate">${esc(c.title)}</div>
+        <div class="ch-status text-xs text-slate-400">${c.selected ? `${c.tracks} tracks cached, updated ${fmtTime(c.updated)}` : "Not included"}</div>
+      </div>
+      ${c.selected ? `
+        <button class="scan px-2 py-1 bg-slate-700 rounded text-xs">Check for new files</button>
+        <button class="full px-2 py-1 bg-slate-700 rounded text-xs">Full rescan</button>` : ""}
+    </li>`).join("") : '<li class="px-4 py-3 text-slate-400 text-sm">No channel matches.</li>';
+}
+
+$("chFilter").oninput = renderChannels;
+$("channelList").addEventListener("click", async e => {
+  const li = e.target.closest("li[data-ch]");
+  if (!li) return;
+  const id = Number(li.dataset.ch), c = allChannels.find(x => x.id === id);
+  try {
+    if (e.target.classList.contains("pick")) {
+      await api("/api/channels/select", { id, selected: e.target.checked, title: c.title, username: c.username });
+      await loadChannels();
+      poll();
+    } else if (e.target.classList.contains("scan")) {
+      await api(`/api/scan/${id}`, {}); poll();
+    } else if (e.target.classList.contains("full") && confirm(`Rescan "${c.title}" from scratch?`)) {
+      await api(`/api/scan/${id}?full=true`, {}); poll();
+    }
+  } catch (err) { fail(err); }
+});
+
+function jobText(j) {
+  if (j.phase === "tags") return `Reading tags ${j.tag_done}/${j.tag_total}`;
+  if (j.phase === "meta") return `Reading track details ${j.tag_done}/${j.tag_total}`;
+  return `Scanning, ${j.found} audio files found${j.oldest ? ` (back to ${j.oldest})` : ""}`;
+}
+
+let pollTimer = null;
+async function poll() {
+  clearTimeout(pollTimer);
+  let busy = false;
+  try {
+    const s = await api("/api/jobs");
+    renderStatus(s.sched);
+    busy = s.sched.running;
+    for (const [id, c] of Object.entries(s.channels)) {
+      const el = document.querySelector(`li[data-ch="${id}"] .ch-status`);
+      const j = c.job;
+      if (j && j.running) busy = true;
+      if (!el) continue;
+      el.classList.toggle("text-red-400", !!(j && j.error && !j.running));
+      el.textContent = j && j.running ? jobText(j)
+        : j && j.error ? `Last scan failed: ${j.error}`
+        : `${c.tracks} tracks cached, updated ${fmtTime(c.updated)}`;
+    }
+  } catch (e) { fail(e); return; }
+  pollTimer = setTimeout(poll, busy ? 2000 : 30000);
+}
+
+// ---------- browse ----------
+function renderBrowseSelect() {
+  const sel = allChannels.filter(c => c.selected);
+  const prev = $("browseCh").value;
+  $("browseCh").innerHTML = '<option value="all">All ticked channels</option>' +
+    sel.map(c => `<option value="${c.id}">${esc(c.title)}</option>`).join("");
+  $("browseCh").value = sel.some(c => String(c.id) === prev) ? prev : "all";
+}
+
+let viewGroups = [];
+async function search() {
+  const ch = $("browseCh").value;
+  $("msg").textContent = "";
+  const params = new URLSearchParams({ q: $("q").value, field: $("field").value, hq: $("hq").checked });
+  try {
+    const d = await api(ch === "all" ? `/api/search_all?${params}` : `/api/library/${ch}?${params}`);
+    viewGroups = d.groups;
+    $("info").textContent = `${d.total} tracks cached, ${d.groups.length} album(s) shown`;
+    $("results").innerHTML = d.groups.length ? d.groups.map((g, gi) => card(g, gi, ch === "all")).join("")
+      : '<p class="text-slate-400">Nothing matches. Tick a channel above or change the search.</p>';
+  } catch (e) { fail(e); }
+}
+
+function tgLink(ch, id) {
+  const u = chUsers[ch];
+  if (u) return `https://t.me/${u}/${id}`;
+  const s = String(ch);
+  return s.startsWith("-100") ? `https://t.me/c/${s.slice(4)}/${id}` : null;
+}
+const tgBtn = (url, cls, text) => url
+  ? `<a href="${url}" target="_blank" rel="noopener" class="${cls} bg-sky-600 rounded whitespace-nowrap">${text}</a>` : "";
+
+const artistOf = t => (t.tags && t.tags.artist) || t.performer || "";
+
+function card(g, gi, showChannel) {
+  const ch = g.channel;
+  const zip = withToken(`/api/zip/${ch}?ids=${g.tracks.map(t => t.id).join(",")}&name=${encodeURIComponent(g.album)}`);
+  const searching = $("q").value.trim() !== "";
+  return `
+  <div class="bg-slate-800 rounded-lg overflow-hidden">
+    <div class="flex flex-wrap items-center gap-3 p-4 bg-slate-700/50">
+      <div class="flex-1 min-w-0">
+        ${showChannel ? `<span class="inline-block mb-1 px-2 py-0.5 rounded bg-slate-600 text-xs">${esc(chTitles[ch] || ch)}</span>` : ""}
+        <div class="font-semibold truncate">${esc(g.album)}</div>
+        <div class="text-xs text-slate-400">${esc(g.artists.join(", ") || "Unknown artist")}, ${g.tracks.length} track(s), ${fmtMB(g.size)}, ${new Date(g.date).toLocaleDateString()}</div>
+      </div>
+      ${tgBtn(tgLink(ch, g.tracks[0].id), "px-3 py-2 text-sm", "Open in Telegram")}
+      <button onclick="playAlbum(${gi})" class="px-3 py-2 bg-purple-600 rounded text-sm whitespace-nowrap">Play album</button>
+      <a href="${zip}" onclick="this.textContent='Preparing ZIP…'" class="px-3 py-2 bg-green-600 rounded text-sm whitespace-nowrap">Download album</a>
+    </div>
+    <ul class="divide-y divide-slate-700">
+      ${g.tracks.map((t, i) => `
+      <li class="flex items-center gap-3 px-4 py-2 ${searching && t.match ? "bg-yellow-500/10" : ""}">
+        <span class="text-slate-500 w-6 text-right text-sm">${i + 1}</span>
+        <div class="flex-1 min-w-0">
+          <div class="truncate">${esc((t.tags && t.tags.title) || t.title || t.name)}</div>
+          <div class="text-xs text-slate-400">${artistOf(t) ? esc(artistOf(t)) + ", " : ""}${t.tags && t.tags.genre ? esc(t.tags.genre) + ", " : ""}${t.tags && t.tags.year ? esc(t.tags.year.slice(0, 4)) + ", " : ""}${fmtMB(t.size)}${t.kbps ? `, about ${t.kbps} kbps` : ""}</div>
+        </div>
+        ${tgBtn(tgLink(ch, t.id), "px-3 py-1 text-xs", "Telegram")}
+        <button onclick="playTrack(${gi}, ${i})" class="px-3 py-1 bg-purple-600 rounded text-xs">Play</button>
+        <a href="${withToken(`/stream/${ch}/${t.id}?dl=1`)}" class="px-3 py-1 bg-blue-600 rounded text-xs">Download</a>
+      </li>`).join("")}
+    </ul>
+  </div>`;
+}
+
+$("searchBtn").onclick = search;
+$("browseCh").onchange = search;
+$("field").onchange = search;
+$("hq").onchange = search;
+$("q").addEventListener("keydown", e => { if (e.key === "Enter") search(); });
+
+// ---------- player ----------
+let queue = { ch: null, tracks: [], i: 0 };
+function playQueue(ch, tracks, i) {
+  queue = { ch, tracks: tracks.slice(), i };
+  const t = queue.tracks[i], a = $("audio");
+  $("msg").textContent = "";
+  a.src = withToken(`/stream/${ch}/${t.id}`);
+  a.play().catch(() => {});
+  $("nowPlaying").textContent = `${artistOf(t) ? artistOf(t) + " – " : ""}${(t.tags && t.tags.title) || t.title || t.name}  (${i + 1}/${queue.tracks.length})`;
+  $("player").classList.remove("hidden");
+}
+function playAlbum(gi) { const g = viewGroups[gi]; playQueue(g.channel, g.tracks, 0); }
+function playTrack(gi, ti) { const g = viewGroups[gi]; playQueue(g.channel, g.tracks, ti); }
+function step(d) {
+  const n = queue.i + d;
+  if (n >= 0 && n < queue.tracks.length) playQueue(queue.ch, queue.tracks, n);
+}
+$("audio").onended = () => step(1);
+$("audio").onerror = () => {
+  const t = queue.tracks[queue.i];
+  if (t) $("msg").textContent = `Your browser can't play "${t.name}". You can still download it.`;
+};
+$("prevBtn").onclick = () => step(-1);
+$("nextBtn").onclick = () => step(1);
+$("closeBtn").onclick = () => { $("audio").pause(); $("audio").removeAttribute("src"); $("player").classList.add("hidden"); };
+
+boot();
+</script>
+</body>
+</html>

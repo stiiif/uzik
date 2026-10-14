@@ -61,7 +61,7 @@ const { startBridge, bundledBridge } = require('./telegram-runner.js');
 const { startUpdateCheck } = require('./update-check.js');
 const { statusPage } = require('./status-page.js');
 const SERVER_VERSION = 4;            // the protocol, what Uzikext checks
-const SERVER_RELEASE = '4.1.0';      // this release (the update check compares it)
+const SERVER_RELEASE = '4.2.0';      // this release (the update check compares it)
 
 const PORT = Number(process.env.PORT) || 8787;
 // Inside the Uzikext app (SERVER_MODE=app): the app starts this server, listening on this computer only

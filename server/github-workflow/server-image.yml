@@ -42,6 +42,13 @@ jobs:
           echo "image=ghcr.io/$owner/uzikext-server" >> "$GITHUB_OUTPUT"
           echo "version=$tag" >> "$GITHUB_OUTPUT"
           echo "major=${tag%%.*}" >> "$GITHUB_OUTPUT"
+      # (a tag that doesn't match SERVER_RELEASE would build a server that keeps saying "a newer server")
+      - name: check the version
+        if: github.ref_type == 'tag'
+        run: |
+          want="${GITHUB_REF_NAME#server-v}"
+          have=$(sed -n "s/^const SERVER_RELEASE = '\([^']*\)'.*/\1/p" "$SERVER_DIR/server.js")
+          if [ "$have" != "$want" ]; then echo "::error::server.js says SERVER_RELEASE = '$have', the tag says $want: change one of them"; exit 1; fi
       - uses: docker/build-push-action@v6
         with:
           context: ${{ env.SERVER_DIR }}

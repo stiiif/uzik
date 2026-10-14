@@ -44,7 +44,8 @@ function createSettings({ getInfo, setInfo, defaults }) {
   }
 
   // a change from the Sync panel (only the parts given): validated, stored, applied
-  function update(patch) {
+  // trusted: from the Uzikext app the server runs in (any folder of that computer may be used)
+  function update(patch, { trusted = false } = {}) {
     const p = patch || {}, next = JSON.parse(JSON.stringify(stored));
     if (typeof p.name === 'string') next.name = p.name.replace(/[\u0000-\u001f]/g, '').trim().slice(0, 60) || undefined;
     if (p.analysis && typeof p.analysis === 'object') {
@@ -60,7 +61,8 @@ function createSettings({ getInfo, setInfo, defaults }) {
       }
       if (p.backups.copyDir !== undefined) {
         const c = p.backups.copyDir == null ? '' : String(p.backups.copyDir);
-        if (c && !mounts(defaults.notCopy).some(x => x.path === c && x.writable)) throw new Error(`${c} isn't one of the folders the server sees`);
+        if (c && !trusted && !mounts(defaults.notCopy).some(x => x.path === c && x.writable)) throw new Error(`${c} isn't one of the folders the server sees`);
+        if (c && trusted && !fs.existsSync(c)) throw new Error(`${c} isn't there`);
         next.backups.copyDir = c;
       }
     }
@@ -81,7 +83,7 @@ function createSettings({ getInfo, setInfo, defaults }) {
         const roots = p.music.roots.map(r => ({ name: String(r.name || '').trim(), dir: path.resolve(String(r.dir || '')) }));
         for (const r of roots) {
           if (!r.name || r.name.includes('/')) throw new Error('a music folder needs its name, as the devices show it');
-          if (r.dir !== base && !r.dir.startsWith(base + path.sep)) throw new Error(`${r.dir} isn't inside ${base}`);
+          if (!trusted && r.dir !== base && !r.dir.startsWith(base + path.sep)) throw new Error(`${r.dir} isn't inside ${base}`);
         }
         (next.music = next.music || {}).roots = roots;
       }

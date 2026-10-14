@@ -27,7 +27,8 @@ function decodeAudioFile(filePath, { timeoutMs = 120000 } = {}) {
       '-ac', '2',              // always decode to stereo — see header comment on why mono sources are fine
       '-',                     // write to stdout
     ];
-    const proc = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    // (FFMPEG_PATH: the app's own copy of ffmpeg, when the server runs inside the Uzikext app)
+    const proc = spawn(process.env.FFMPEG_PATH || 'ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
     const chunks = [];
     let stderr = '';
     let settled = false;

@@ -104,9 +104,11 @@ function createAuth({ db, getInfo, setInfo, legacyToken, log }) {
 
   // a device using the old shared token gets a key of its own
   function upgrade(name, platform, ip) { return newDevice(name, platform, 'token', ip); }
+  // the Uzikext app this server runs in pairs itself (POST /local/pair, with the app's admin key)
+  function local(name, platform) { return newDevice(name, platform, 'this computer', '127.0.0.1'); }
 
   return {
-    check, pair, upgrade, makeCode,
+    check, pair, upgrade, local, makeCode,
     deviceCount: () => st.count.get().n,
     list: () => st.all.all(),
     remove: id => st.del.run(String(id)).changes > 0,

@@ -61,9 +61,16 @@ const { startBridge, bundledBridge } = require('./telegram-runner.js');
 const { startUpdateCheck } = require('./update-check.js');
 const { statusPage } = require('./status-page.js');
 const SERVER_VERSION = 4;            // the protocol, what Uzikext checks
-const SERVER_RELEASE = '4.0.0';      // this release (the update check compares it)
+const SERVER_RELEASE = '4.1.0';      // this release (the update check compares it)
 
 const PORT = Number(process.env.PORT) || 8787;
+// Inside the Uzikext app (SERVER_MODE=app): the app starts this server, listening on this computer only
+// (BIND=127.0.0.1, "just this computer") or for the other devices too ("this computer is the server"), and
+// manages it through /local/… with LOCAL_ADMIN_KEY (from this computer only). It stops with the app.
+const SERVER_MODE = process.env.SERVER_MODE || 'server';
+const BIND = process.env.BIND || undefined;
+const LOCAL_ADMIN_KEY = process.env.LOCAL_ADMIN_KEY || '';
+if (process.env.PARENT_WATCH === 'stdin') { process.stdin.on('end', () => process.exit(0)); process.stdin.on('error', () => process.exit(0)); process.stdin.resume(); }
 const TOKEN = process.env.SYNC_TOKEN || '';   // the old shared token: optional now (devices pair with a code)
 const DATA_DIR = process.env.DATA_DIR || '/data';
 const DB_FILE = path.join(DATA_DIR, 'tracktagger.db');
@@ -483,6 +490,10 @@ function afterWrite(res, body, kind) {
 // ---------- background analysis: started, and started again when its settings or music folders change ----------
 let analysisScheduler = null;
 let musicMatch = null, matching = null;
+// what holds the background analysis back (the app says: 'dvs', 'battery', 'busy'), renewed by the app;
+// forgotten after 2 minutes without news
+let holds = { reasons: [], at: 0 };
+const heldBy = () => (Date.now() - holds.at < 120000 ? holds.reasons : []);
 const rootsNow = () => settings.effective().music.roots || (musicMatch ? musicMatch.roots.map(r => ({ name: r.name, dir: r.dir })) : []);
 let runningWith = '';
 function applyAnalysis() {
@@ -494,7 +505,7 @@ function applyAnalysis() {
   if (!roots.length) return;
   analysisScheduler = startAnalysisScheduler({
     db, energyUpsertStmt: stmts.energyUpsert, energyGetStmt: stmts.energyGet, energyMarkSkippedStmt: stmts.energyMarkSkipped, nextSeq,
-    roots, paceMs: a.paceMs, rescanMs: a.rescanMs, concurrency: a.concurrency, maxDurationSec: a.maxDurationSec,
+    roots, heldBy, paceMs: a.paceMs, rescanMs: a.rescanMs, concurrency: a.concurrency, maxDurationSec: a.maxDurationSec,
     log: msg => console.log(`[analysis] ${msg}`), broadcast,
   });
   console.log(`[analysis] music: ${roots.map(r => `${r.dir} as "${r.name}"`).join(', ')}; ${a.concurrency} at a time, ${a.paceMs} ms apart, max ${a.maxDurationSec ? a.maxDurationSec + ' s' : 'any length'}`);
@@ -536,7 +547,7 @@ function fullSettings() {
   const e = settings.effective();
   const shown = { ...e, telegram: { apiId: e.telegram.apiId || null, from: e.telegram.from, hasHash: !!e.telegram.apiHash } };
   return { settings: shown, defaults: null, music: musicState(), mounts: mounts([path.resolve(DATA_DIR), MUSIC_DIR && path.resolve(MUSIC_DIR)]),
-    network: { allowFrom: guard.mode }, legacyToken: auth.legacy(), telegram: tgState(), update: updates.state() };
+    network: { allowFrom: guard.mode, bind: BIND || 'all' }, mode: SERVER_MODE, legacyToken: auth.legacy(), telegram: tgState(), update: updates.state() };
 }
 
 const firstRun = () => auth.deviceCount() === 0 && auth.legacy() !== 'on';
@@ -566,6 +577,28 @@ const server = http.createServer((req, res) => {
     });
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'X-Frame-Options': 'DENY', 'Content-Security-Policy': "default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'" });
     return res.end(html);
+  }
+  // ----- the Uzikext app this server runs in (this computer only, with its admin key) -----
+  if (p.startsWith('/local/')) {
+    const loopback = /^(127\.|::1$)/.test(ip);
+    const key = req.headers['x-local-admin'] || '';
+    if (!LOCAL_ADMIN_KEY || !loopback || key.length !== LOCAL_ADMIN_KEY.length || !crypto.timingSafeEqual(Buffer.from(key), Buffer.from(LOCAL_ADMIN_KEY))) return send(res, 403, { error: 'forbidden' });
+    return readJson(req, res, body => {
+      if (p === '/local/pair') return send(res, 200, { ok: true, ...auth.local(body.name, body.platform), server: identity() });
+      if (p === '/local/config') {
+        const patch = {};
+        if ('musicRoots' in body) patch.music = { roots: Array.isArray(body.musicRoots) && body.musicRoots.length ? body.musicRoots : [] };
+        if ('copyDir' in body) patch.backups = { copyDir: body.copyDir || '' };
+        if (typeof body.name === 'string') patch.name = body.name;
+        try { settings.update(patch, { trusted: true }); } catch (e) { return send(res, 400, { error: e.message }); }
+        return send(res, 200, fullSettings());
+      }
+      if (p === '/local/hold') {
+        holds = { reasons: (Array.isArray(body.reasons) ? body.reasons : []).map(String).slice(0, 8), at: Date.now() };
+        return send(res, 200, { ok: true, held: heldBy() });
+      }
+      send(res, 404, { error: 'not found' });
+    });
   }
   const who = auth.check(tokenOf(req, url), ip);
   if (p === '/health' && req.method === 'GET') {
@@ -788,9 +821,11 @@ const server = http.createServer((req, res) => {
 if (settings.effective().music.roots) applyAnalysis();
 if (MUSIC_DIR) { setTimeout(rematch, 3000).unref(); setInterval(rematch, ANALYSIS_RESCAN_MS).unref(); }
 
-server.listen(PORT, () => {
+server.on('error', e => { console.error(`Can't listen on port ${PORT}: ${e.message}`); process.exit(3); });
+server.listen(PORT, BIND, () => {
   const c = stmts.counts.get(), e = settings.effective();
   console.log(`Uzikext server ${SERVER_RELEASE} ("${e.name}", id ${SERVER_ID}) listening on :${PORT} — core=${c.core} energy=${c.energy} maxSeq=${maxSeq} epoch=${EPOCH}`);
+  if (SERVER_MODE === 'app') console.log(`[app] inside the Uzikext app, ${BIND && /^127\./.test(BIND) ? 'for this computer only' : 'for the other devices of the home network too'}`);
   console.log(`[network] answering ${guard.mode === 'home' ? 'the home network only' : guard.mode === 'any' ? 'every address (ALLOW_FROM=any)' : 'the home network and ' + process.env.ALLOW_FROM}`);
   console.log(`[pairing] ${auth.deviceCount()} device(s) paired; the old shared token: ${auth.legacy()}`);
   if (auth.deviceCount() === 0 && auth.legacy() !== 'on') {

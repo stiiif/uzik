@@ -112,7 +112,7 @@ function makeAnalysisWorkerRunner(log) {
   return { run, terminate: () => { if (worker) { worker.terminate(); worker = null; } } };
 }
 
-function startAnalysisScheduler({ db, energyUpsertStmt, energyGetStmt, energyMarkSkippedStmt, nextSeq, musicDir, rootName, roots, paceMs, rescanMs, concurrency = 1, maxDurationSec = 0, log, broadcast }) {
+function startAnalysisScheduler({ db, energyUpsertStmt, energyGetStmt, energyMarkSkippedStmt, nextSeq, musicDir, rootName, roots, heldBy, paceMs, rescanMs, concurrency = 1, maxDurationSec = 0, log, broadcast }) {
   // One persistent worker per lane, each able to have one track in flight at a time — concurrency > 1
   // means that many tracks genuinely analyze simultaneously, not just queued back-to-back. Safe to do
   // now specifically because each lane's DSP work runs on its OWN worker thread (see
@@ -255,7 +255,10 @@ function startAnalysisScheduler({ db, energyUpsertStmt, energyGetStmt, energyMar
   function processNext() {
     stats.enabled = readAnalysisEnabled(db); // read fresh each tick — an extension toggle takes effect
                                               // within one pace cycle, no server restart needed
-    if (!stats.enabled) return;
+    // held (the server inside the Uzikext app: the decks are playing, on battery, the computer in use…):
+    // nothing new starts; what's running finishes
+    stats.held = heldBy ? heldBy() : [];
+    if (!stats.enabled || stats.held.length) return;
     for (let i = 0; i < laneCount; i++) processLane(i);
   }
 
@@ -268,7 +271,7 @@ function startAnalysisScheduler({ db, energyUpsertStmt, energyGetStmt, energyMar
   workTimer = setInterval(processNext, paceMs);
 
   return {
-    getStats: () => ({ ...stats }),
+    getStats: () => ({ ...stats, held: heldBy ? heldBy() : [] }),
     stop: () => { stopped = true; clearInterval(rescanTimer); clearInterval(workTimer); workerRunners.forEach(r => r.terminate()); },
   };
 }

@@ -17,9 +17,10 @@ function startBridge({ dir, python, dataDir, port, token, apiId, apiHash, env = 
   function launch() {
     if (stopped) return;
     startedAt = Date.now(); state.starts++;
-    child = spawn(python, ['-m', 'uvicorn', 'app:app', '--host', '127.0.0.1', '--port', String(port), '--workers', '1', '--no-access-log'], {
+    // (--app-dir: Windows' embeddable Python, in the app, doesn't look in the current folder by itself)
+    child = spawn(python, ['-m', 'uvicorn', 'app:app', '--app-dir', dir, '--host', '127.0.0.1', '--port', String(port), '--workers', '1', '--no-access-log'], {
       cwd: dir, env: { ...process.env, ...env, SYNC_TOKEN: token, DATA_DIR: dataDir, PORT: String(port), TG_API_ID: String(apiId), TG_API_HASH: String(apiHash), PYTHONUNBUFFERED: '1' },
-      stdio: ['ignore', 'pipe', 'pipe']
+      stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true
     });
     state.running = true; state.pid = child.pid;
     const lines = buf => String(buf).split('\n').map(l => l.trimEnd()).filter(Boolean);

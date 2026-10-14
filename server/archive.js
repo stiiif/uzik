@@ -36,7 +36,7 @@ analysis/energy.jsonl    each track's analysis (intensity, BPM, melody, sub-bass
 analysis/energy.bin      and its analysed waveform (binary, see energy-codec.js)
 device/                  (device exports only) that device's own settings and stores
 
-To restore: Uzikext → Sync panel → Backups → Restore (a backup on the server) or
+To restore: Uzikext → ⋮ → Backups → Restore (a backup on the server) or
 "Restore from a file…" (this file). Everything in it comes back as it was then; what was
 added since stays.
 `;
@@ -128,7 +128,7 @@ function openArchive(buf, nameHint = '') {
   const manifest = z.json('manifest.json');
   if (!manifest || manifest.format !== FORMAT) {
     if (z.has('manifest.json') && parseJson(z.text('manifest.json'))?.format === 'uzikext-everything')
-      throw new Error('this is an older "Export everything" file: import it on a device (⋮ → Import everything…), then that device syncs it to the server');
+      throw new Error('this is an older "Export everything" file: import it on a device (⋮ → Backups → Import everything…), then that device syncs it to the server');
     throw new Error(`${nameHint || 'this file'} isn't an Uzikext archive`);
   }
   if (manifest.version > VERSION) throw new Error(`this archive was made by a newer version (format ${manifest.version}); update the sync server first`);
@@ -141,6 +141,28 @@ function openArchive(buf, nameHint = '') {
   if (z.has('analysis/energy.jsonl')) { energy = parseJsonl(z.text('analysis/energy.jsonl')); bin = z.get('analysis/energy.bin') || Buffer.alloc(0); }
   const blobOf = r => (r.blob && bin) ? bin.subarray(r.blob[0], r.blob[0] + r.blob[1]) : null;
   return { manifest, data, energy, blobOf };
+}
+
+// What an archive holds, without reading its analysis: { manifest, live: {kind: records not removed}, analysis }
+// (Uzikext shows it before a restore)
+function describeArchive(buf, nameHint = '') {
+  const isZip = buf.length > 4 && buf.readUInt32LE(0) === 0x04034b50;
+  if (!isZip) {
+    const a = openArchive(buf, nameHint);
+    return { manifest: a.manifest, live: Object.fromEntries(Object.entries(a.data).map(([k, rows]) => [k, rows.filter(r => !r.removed).length])), analysis: 0 };
+  }
+  const z = readZip(buf);
+  const manifest = z.json('manifest.json');
+  if (!manifest || manifest.format !== FORMAT) throw new Error(`${nameHint || 'this file'} isn't an Uzikext archive`);
+  const live = {};
+  for (const n of z.names) {
+    const m = /^data\/([a-z]+)\.jsonl$/.exec(n);
+    if (!m) continue;
+    let count = 0;
+    for (const line of z.text(n).split('\n')) { if (!line.trim()) continue; try { if (!JSON.parse(line).removed) count++; } catch (e) {} }
+    live[m[1]] = count;
+  }
+  return { manifest, live, analysis: (manifest.counts && manifest.counts.analysis) || 0 };
 }
 
 // A record's content without its timestamp (what changed, regardless of when)
@@ -308,4 +330,4 @@ function undoRestore(db, arc, undo, { write, now, out, stmts, nextSeq }) {
   }
 }
 
-module.exports = { FORMAT, VERSION, CORE_KINDS, writeServerArchive, openArchive, restoreArchive, restoreMode, snapshot, packEnergy, parseJsonl };
+module.exports = { FORMAT, VERSION, CORE_KINDS, writeServerArchive, openArchive, describeArchive, restoreArchive, restoreMode, snapshot, packEnergy, parseJsonl };

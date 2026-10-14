@@ -3,7 +3,7 @@
 #
 #   Start:   docker compose up -d        (or Container Station → Create → Application → paste this file)
 #   Pair:    open http://<this machine's address>:8787 → "Get a pairing code", or Uzikext → Sync → Find my server
-#   Update:  docker compose pull && docker compose up -d     (Uzikext's Sync panel says when there's a new one)
+#   Update:  docker compose pull && docker compose up -d     (Uzikext's ⋮ → Sync says when there's a new one)
 
 services:
   uzikext-server:
@@ -23,14 +23,14 @@ services:
       #    (the server finds which by itself). Leave it out to have no background analysis.
       - /path/to/your/music:/music:ro
       # 3. Optional: a folder on ANOTHER disk for a copy of every backup (a USB drive, another share). It's
-      #    then offered in the Sync panel → Backups. It must exist (an unplugged drive is reported, not filled).
+      #    then offered in ⋮ → Backups → A copy on another disk. It must exist (an unplugged drive is reported, not filled).
       # - /path/to/another/disk/uzikext-backups:/backup-copy
     # Only for special cases (all optional): uncomment "environment:" and the lines you need.
     # environment:
       # ALLOW_FROM: "home"            # who may connect: "home" (your home network and VPN, the default),
       #                               # "any" (a rented server behind your own HTTPS), or addresses/CIDRs
       # SYNC_TOKEN: "…"               # the old shared token, for devices not paired yet; switch it off in the
-      #                               # Sync panel once they all are (they get their own key by themselves)
+      #                               # ⋮ → Sync → Devices once they all are (they get their own key by themselves)
       # TELEGRAM_BRIDGE_URL: "off"    # no Telegram at all
       # MDNS: "off"
       # TZ: "Europe/London"         # your time zone, for the times in the log

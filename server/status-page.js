@@ -30,8 +30,11 @@ button{font:inherit;padding:8px 14px;border-radius:8px;border:1px solid var(--li
 <div class="card"><h2>Pair a device</h2>
 <p class="muted">In Uzikext: ⋮ → Sync → <b>Find my server</b> (or type the address above), then enter the 6-digit code.</p>
 <button id="get">Get a pairing code</button><div id="out"></div>
-<p class="muted" style="margin-bottom:0">${firstRun ? 'No device is paired yet: the code is shown here.' : 'Devices are already paired: get the code from one of them (Sync panel → Devices → Add a device), or from this server\'s log (Container Station → this container → Logs), where this button writes it.'}</p></div>
+<p class="muted" style="margin-bottom:0">${firstRun ? 'No device is paired yet: the code is shown here.' : 'Devices are already paired: get the code from one of them (⋮ → Sync → Devices → Add a device), or from this server\'s log (Container Station → this container → Logs), where this button writes it.'}</p></div>
 <script>
+// opened from a pairing link (…/pair#123456): what to do with it
+const linkCode = (/^#(\\d{6})$/.exec(location.hash) || [])[1];
+if (linkCode) document.getElementById('out').innerHTML = '<p>This is a pairing link. On the new device, in Uzikext: ⋮ → Sync → <b>Or paste a pairing link</b>, and paste this page\\'s address. Or type the code:</p><div class="code">' + linkCode.slice(0, 3) + ' ' + linkCode.slice(3) + '</div>';
 document.getElementById('get').onclick = async () => {
   const out = document.getElementById('out');
   out.textContent = '…';

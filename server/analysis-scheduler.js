@@ -34,7 +34,7 @@ function readAnalysisSettings(db) {
 // setSyncedSetting in player.js) — one shared `core`/`settings` row the extension writes and the server
 // reads back on its own next tick, no new endpoint needed. Defaults to OFF (an explicit opt-in gate) when
 // nothing's been set yet: MUSIC_DIR/MUSIC_ROOT_NAME alone configure the *capability*, they don't start it
-// running — someone has to actually flip the switch in the extension's Sync panel first.
+// running — someone has to actually flip the switch in Uzikext's settings (⋮ → Analysis) first.
 function readAnalysisEnabled(db) {
   try {
     const row = db.prepare("SELECT payload FROM core WHERE kind='settings' AND key='analysisEnabled'").get();

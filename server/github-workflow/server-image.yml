@@ -8,7 +8,7 @@
 #
 # A release: push a tag server-v<version>, e.g.  git tag server-v4.0.0 && git push origin server-v4.0.0
 # (the version must match SERVER_RELEASE in server.js). Then publish a GitHub release for that tag: the
-# servers already running see it and the Sync panel says "update available".
+# servers already running see it and Uzikext's ⋮ → Sync says "A newer server".
 name: server image
 
 on:

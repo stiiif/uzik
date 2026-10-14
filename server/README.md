@@ -3,21 +3,21 @@
 **v4 (phase 1 of the easy setup):**
 
 - **Pairing instead of a token.** Each device pairs with a 6-digit code and gets a key of its own; devices are
-  listed and removed in Uzikext's Sync panel → Devices. `SYNC_TOKEN` is optional: while it's set, devices
-  using it keep working and get their own key by themselves; switch it off in the Sync panel once they all have.
+  listed and removed in Uzikext's settings (⋮ → Sync → Devices). `SYNC_TOKEN` is optional: while it's set, devices
+  using it keep working and get their own key by themselves; switch it off in ⋮ → Sync → Devices once they all have.
 - **Found by itself.** Uzikext → Sync → *Find my server* finds it on the home network, and follows it to a
   new address (it's known by its identity, not its address).
 - **Set from Uzikext.** Its name, the music folder (found by itself: no more `MUSIC_ROOT_NAME`), the analysis
-  speed, the backups (hourly/daily, the copy folder) are in the Sync panel; the environment variables only
+  speed, the backups (hourly/daily, the copy folder) are in Uzikext's settings (⋮ → Analysis, ⋮ → Backups); the environment variables only
   give the starting values.
 - **Telegram inside the server.** The Telegram bridge runs in the same container (started and watched by the
-  server, its data in `data/telegram`). Each user enters their own Telegram app ID in Uzikext (Sync → On
-  the server → Telegram; made in 2 minutes at my.telegram.org): it stays on their server. Uzikext
+  server, its data in `data/telegram`). Each user enters their own Telegram app ID in Uzikext (⋮ → Library
+  → Telegram → App ID; made in 2 minutes at my.telegram.org): it stays on their server. Uzikext
   reaches it through the server with its device key: no bridge address, token or second container. Sign in
-  from Uzikext (⋮ → Add Telegram…, or Sync → On the server → Telegram → Sign in); the phone number, code
+  from Uzikext (⋮ → Library → Telegram → Sign in); the phone number, code
   and password are passed to Telegram once and never stored.
 - **A ready-made image** (amd64 and arm64, GitHub's registry) and a short `docker-compose.yml`: two folders
-  and a port. The Sync panel says when a newer server exists.
+  and a port. Uzikext (⋮ → Sync) says when a newer server exists.
 - **Safer by default.** Only the home network may connect (`ALLOW_FROM`), device keys are stored hashed, other
   web pages can't read its answers (CORS).
 
@@ -30,13 +30,13 @@
    *Create*. **Or** in a terminal, in this folder: `docker compose up -d`.
 3. Open `http://<the NAS's address>:8787` in a browser: the server's page, with *Get a pairing code*.
 4. In Uzikext: ⋮ → **Sync** → **Find my server** (or type the address) → the code → **Pair this device**.
-   For your other devices: Sync → Devices → **Add a device** gives a code (or the page's button: it then
+   For your other devices: ⋮ → Sync → Devices → **Add a device** gives a code or a link (or the page's button: it then
    writes the code in the container's log, Container Station → the container → *Logs*).
-5. Telegram (optional): Sync → On the server → Telegram: your own Telegram app ID (my.telegram.org → API
-   development tools → create an app → its api_id and api_hash), then ⋮ → *Add Telegram…* → sign in → tick
-   your channels.
-6. Background analysis: Sync → *Background analysis* → tick *Analyze tracks automatically*. The music
-   folder is matched by itself once a device has added it (Sync → *On the server* → Music says what it found).
+5. Telegram (optional): ⋮ → Library → Telegram → App ID: your own Telegram app ID (my.telegram.org → API
+   development tools → create an app → its api_id and api_hash), then *Sign in* → *Add to the library* →
+   *Add channel* for each of your channels.
+6. Background analysis: ⋮ → Analysis → *In the background*. The music folder is matched by itself once a
+   device has added it (⋮ → Sync → *Music folder* says what it found).
 
 **Updating:** when Uzikext says a newer server exists: Container Station → the application → *Recreate*
 (with *pull the image*), or `docker compose pull && docker compose up -d`. The data folder is kept.
@@ -54,7 +54,7 @@ Your data folder, backups and Telegram bridge stay as they are.
      volume;
    - the `energy-analysis-core.js` mount can stay.
    - **Telegram, now inside the server:** move your `TG_API_ID` and `TG_API_HASH` from the bridge's service to
-     this one (or enter them in Uzikext afterwards: Sync → On the server → Telegram), mount the bridge's data folder at `/data/telegram` (it holds the sign-in and the channels'
+     this one (or enter them in Uzikext afterwards: ⋮ → Library → Telegram → App ID), mount the bridge's data folder at `/data/telegram` (it holds the sign-in and the channels'
      lists: nothing to redo), and delete the `telegram-bridge` service:
      ```yaml
      volumes:
@@ -66,7 +66,7 @@ Your data folder, backups and Telegram bridge stay as they are.
 4. Update Uzikext on every device (app: rebuild; extension: reload). Each device gets its own key at its
    next sync, and Telegram moves to the server by itself (once the server's bridge is signed in: with the
    mounted folder, it already is).
-5. When every device shows *This device uses: its own key*: Sync → Devices → *Switch off* the old shared
+5. When every device shows *Its key: its own* (⋮ → Sync): ⋮ → Sync → Devices → *Switch off* the old shared
    token.
 
 Row-level SQLite store with delta sync for the DIGGA / Track Tagger extension (v1.2+).
@@ -185,7 +185,7 @@ database's identity; only this database's own backups are rotated, an earlier da
 |---|---|---|---|
 | `uzikext-data-<time>-hourly.uzx` | your data | every hour | the last 48 |
 | `uzikext-full-<time>-daily.uzx` | your data + the analysis | every day | 14 days, plus the last of each of 8 weeks and 12 months |
-| `…-manual.uzx` | everything | Sync panel → Back up now | the last 10 |
+| `…-manual.uzx` | everything | ⋮ → Backups → Back up now | the last 10 |
 | `uzikext-full-<time>-before-restore.uzx` | everything as it was | before every restore | the last 10 |
 
 The first full one is made a few seconds after the server starts.
@@ -193,10 +193,10 @@ The first full one is made a few seconds after the server starts.
 **A copy off the server's disk:** mount a second folder (another share, a USB drive, a cloud-synced folder)
 and set `BACKUP_COPY_DIR` to it (see `docker-compose.yml`). Every backup is copied there as it's made, and
 what's missing there is copied at start (a drive that was unplugged catches up). The folder must exist: it
-isn't created, so an unplugged drive is reported in the Sync panel instead of its empty mount point being
+isn't created, so an unplugged drive is reported in ⋮ → Backups instead of its empty mount point being
 filled. The same rotation applies there.
 
-**Restoring** (Sync panel → Backups → Restore, or *Restore from a file…*) depends on where the archive
+**Restoring** (⋮ → Backups → Restore: a backup, or *Restore from a file…*; its contents are shown first) depends on where the archive
 comes from:
 
 - **A backup of this database: rolled back to.**
@@ -244,23 +244,23 @@ no longer want them. A `core-*.json` can still be restored with *Restore from a 
 
 ## Environment variables
 
-All optional. What's set in the Sync panel wins over them (they're the starting values).
+All optional. What's set in Uzikext's settings wins over them (they're the starting values).
 
 ```yaml
 PORT: 8787
 DATA_DIR: /data
-SERVER_NAME: Uzikext server       # its name (Sync panel → On the server)
+SERVER_NAME: Uzikext server       # its name (⋮ → Sync → The server)
 ALLOW_FROM: home                  # home | any | addresses/CIDRs, comma-separated (added to home)
 CORS_ORIGINS: ''                  # more origins allowed to read answers
 SYNC_TOKEN: ''                    # the old shared token (devices on it get their own key by themselves)
 MDNS: on                          # answer "_uzikext._tcp.local" (needs network_mode: host to reach devices)
 MUSIC_DIR: /music                 # (when something is mounted there)
 MUSIC_ROOT_NAME: ''               # force the name of MUSIC_DIR as the devices know it (found by itself otherwise)
-ANALYSIS_CONCURRENCY: 1           # Sync panel → Analysis speed
+ANALYSIS_CONCURRENCY: 1           # ⋮ → Analysis → The server → Speed
 ANALYSIS_PACE_MS: 2000
-ANALYSIS_MAX_DURATION_SEC: 1200   # Sync panel → Skip tracks longer than
+ANALYSIS_MAX_DURATION_SEC: 1200   # ⋮ → Analysis → The server → Skip tracks longer than
 ANALYSIS_RESCAN_MS: 1800000       # how often the music folder is looked through (and matched again)
-TG_API_ID: ''                     # a Telegram app ID (normally entered in Uzikext: Sync → On the server → Telegram)
+TG_API_ID: ''                     # a Telegram app ID (normally entered in Uzikext: ⋮ → Library → Telegram → App ID)
 TG_API_HASH: ''
 REFRESH_MINUTES: 60               # the bridge: how often the ticked channels are checked for new posts
 SCAN_YEARS: 3                     # the bridge: how far back a newly ticked channel is scanned; 0 = all
@@ -268,7 +268,7 @@ TELEGRAM_BRIDGE_URL: ''           # a bridge elsewhere instead (e.g. http://tele
 TELEGRAM_BRIDGE_TOKEN: ''         # that bridge's SYNC_TOKEN (default: SYNC_TOKEN)
 UPDATE_REPO: ''                   # owner/name on GitHub, for "update available" (set by the image build); "off"
 MAX_BODY: 33554432                # 32 MB per request (energy pushes are ~150 tracks per batch, gzip'd)
-BACKUP_COPY_DIR: ''               # a copy folder (Sync panel → Backups: one of the folders the server sees)
+BACKUP_COPY_DIR: ''               # a copy folder (⋮ → Backups → A copy on another disk: one of the folders the server sees)
 BACKUP_KEEP_HOURLY: 48
 BACKUP_KEEP_DAILY: 14
 BACKUP_KEEP_WEEKLY: 8

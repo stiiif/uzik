@@ -1,6 +1,6 @@
-// The server's own settings, changed from Uzikext's Sync panel and kept in the database (table info, key
+// The server's own settings, changed from Uzikext's settings and kept in the database (table info, key
 // server_settings). The environment variables (docker-compose.yml) only give the starting values: what's set
-// in the Sync panel wins over them.
+// in Uzikext's settings wins over them.
 const fs = require('fs');
 const path = require('path');
 
@@ -37,13 +37,13 @@ function createSettings({ getInfo, setInfo, defaults }) {
       },
       music: {
         dir: d.music.dir,
-        // [{ name, dir }] chosen by hand in the Sync panel, or null: found by itself (music-match.js)
+        // [{ name, dir }] chosen by hand in Uzikext's settings, or null: found by itself (music-match.js)
         roots: Array.isArray(m.roots) ? m.roots : d.music.roots
       }
     };
   }
 
-  // a change from the Sync panel (only the parts given): validated, stored, applied
+  // a change from Uzikext's settings (only the parts given): validated, stored, applied
   // trusted: from the Uzikext app the server runs in (any folder of that computer may be used)
   function update(patch, { trusted = false } = {}) {
     const p = patch || {}, next = JSON.parse(JSON.stringify(stored));
@@ -99,7 +99,7 @@ function createSettings({ getInfo, setInfo, defaults }) {
   return { effective, update, onChange: fn => listeners.push(fn), stored: () => stored };
 }
 
-// Folders the container has been given (its mounts), for the backups' copy: the Sync panel offers these.
+// Folders the container has been given (its mounts), for the backups' copy: Uzikext's settings offer these.
 function mounts(exclude = []) {
   let text = '';
   try { text = fs.readFileSync('/proc/self/mountinfo', 'utf8'); } catch (e) { return []; }

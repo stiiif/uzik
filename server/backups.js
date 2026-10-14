@@ -3,7 +3,7 @@
 //
 //   every hour (when something changed)   your data                    uzikext-data-<time>-hourly.uzx
 //   every day  (when something changed)   your data + all the analysis uzikext-full-<time>-daily.uzx
-//   from the Sync panel ("Back up now")   either                       …-manual.uzx
+//   from Uzikext ("Back up now")          either                       …-manual.uzx
 //   before every restore                  everything, as it was        uzikext-full-<time>-before-restore.uzx
 //
 // Kept: the last 48 hourly ones (2 days); daily ones: the last 14 days, plus the last of each of the last
@@ -13,7 +13,7 @@
 //
 // The copy (BACKUP_COPY_DIR): a second folder, ideally on another disk or machine (another NAS share, a USB
 // drive, a folder synced to the cloud). Every archive is copied there as it's made, and anything missing
-// there is copied over at start; the same rotation applies there. If it can't be written, the Sync panel
+// there is copied over at start; the same rotation applies there. If it can't be written, Uzikext's settings
 // says so.
 const fs = require('fs');
 const path = require('path');
@@ -84,7 +84,7 @@ function rotate(dir, keep, log, epoch8) {
   }
 }
 
-// getCfg() -> { keep, hourlyMs, dailyMs, hourly, daily, copyDir }: read each time (the Sync panel changes them)
+// getCfg() -> { keep, hourlyMs, dailyMs, hourly, daily, copyDir }: read each time (Uzikext's settings change them)
 function createBackups({ db, dir, getCfg, checkMs = 5 * 60 * 1000, getInfo, setInfo, epoch, getMaxSeq, serverVersion, log }) {
   fs.mkdirSync(dir, { recursive: true });
   const epoch8 = String(epoch).slice(0, 8);

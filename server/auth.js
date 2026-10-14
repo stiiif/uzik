@@ -2,7 +2,7 @@
 //
 //   A device key   uzk1.<device id>.<secret>   made once, at pairing, and given to that device only. The
 //                  server keeps only a keyed hash of it (HMAC with the server's own secret), so the database
-//                  alone can't be used to sign in. Removing a device (Sync panel → Devices) ends its access
+//                  alone can't be used to sign in. Removing a device (⋮ → Sync → Devices) ends its access
 //                  at once.
 //   A pairing code 6 digits, valid 10 minutes, used once. Made by an already paired device ("Add a device"),
 //                  or on the server's status page while no device is paired yet (a fresh server), or, after

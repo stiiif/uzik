@@ -48,12 +48,12 @@ const { DatabaseSync } = require('node:sqlite');
 const Codec = require('./energy-codec.js');
 const { startAnalysisScheduler } = require('./analysis-scheduler.js');
 const { createBackups } = require('./backups.js');
-const { openArchive, restoreArchive } = require('./archive.js');
+const { openArchive, describeArchive, restoreArchive } = require('./archive.js');
 const crypto = require('crypto');
 const os = require('os');
 const { createAuth } = require('./auth.js');
 const { createGuard } = require('./netguard.js');
-const { startDiscovery } = require('./discovery.js');
+const { startDiscovery, localV4 } = require('./discovery.js');
 const { createSettings, mounts } = require('./settings.js');
 const { matchMusic } = require('./music-match.js');
 const { createTgProxy } = require('./tg-proxy.js');
@@ -204,7 +204,7 @@ if (!EPOCH) { EPOCH = crypto.randomBytes(8).toString('hex'); setInfo('epoch', EP
 // don't skip what they think they already have.
 // (Also in the backups' copy folder, when there is one: restoring the whole data folder from a snapshot
 // brings its own old epoch.json back, but not the copy folder's.)
-// (the copy folder's can change from the Sync panel: see epochFiles())
+// (the copy folder's can change from Uzikext's settings: see epochFiles())
 const EPOCH_FILES = [path.join(DATA_DIR, 'epoch.json')];
 const storedCopyDir = (() => { try { const b = (JSON.parse(getInfo('server_settings') || '{}').backups) || {}; return b.copyDir != null ? b.copyDir : BACKUP_COPY_DIR; } catch (e) { return BACKUP_COPY_DIR; } })();
 const copyEpochFile = dir => dir ? path.join(dir, 'uzikext-sync-position.json') : null;
@@ -566,14 +566,14 @@ const server = http.createServer((req, res) => {
   if (req.method === 'OPTIONS') { res.writeHead(204, { ...res.cors, 'Access-Control-Max-Age': '600' }); return res.end(); }
 
   // ----- no key needed -----
-  if ((p === '/' || p === '/status') && req.method === 'GET') {
+  if ((p === '/' || p === '/status' || p === '/pair') && req.method === 'GET') {
     const a = analysisState(), m = musicState(), t = tgState();
     const html = statusPage({
       name: settings.effective().name, release: SERVER_RELEASE, address: `http://${req.headers.host || 'this-server:' + PORT}`,
       devices: auth.deviceCount(), update: updates.state(), firstRun: firstRun(),
       music: m.roots.length ? m.roots.map(r => `${r.dir} as "${r.name}"`).join(', ') : (MUSIC_DIR ? `${MUSIC_DIR}: not matched with your devices' folders yet (add your music folder in Uzikext)` : 'none mounted (/music)'),
       analysis: !a ? 'off (no music folder)' : `${a.enabled ? 'on' : 'paused'} · ${(a.totalKnown - a.queueLength).toLocaleString()} of ${a.totalKnown.toLocaleString()} tracks analysed`,
-      telegram: t.needsAppId ? 'waiting for your Telegram app ID (Uzikext → Sync → On the server → Telegram)' : !t.configured ? 'off' : t.reachable ? (t.authorized ? 'signed in' : 'bridge running, not signed in') : t.reachable === false ? `bridge not reachable${t.error ? ' (' + t.error + ')' : ''}` : '…'
+      telegram: t.needsAppId ? 'waiting for your Telegram app ID (Uzikext → ⋮ → Library → Telegram → App ID)' : !t.configured ? 'off' : t.reachable ? (t.authorized ? 'signed in' : 'bridge running, not signed in') : t.reachable === false ? `bridge not reachable${t.error ? ' (' + t.error + ')' : ''}` : '…'
     });
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'X-Frame-Options': 'DENY', 'Content-Security-Policy': "default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'" });
     return res.end(html);
@@ -633,7 +633,8 @@ const server = http.createServer((req, res) => {
     req.resume();
     const c = auth.makeCode(myDevice || 'token');
     console.log(`[pairing] Pairing code made by ${who.kind === 'device' ? `"${who.device.name}"` : 'the shared token'}, valid 10 minutes`);
-    return send(res, 200, { code: c.code, expires: c.expires });
+    const lan = BIND && /^127\.|^localhost$/.test(BIND) ? [] : localV4().map(a => `http://${a}:${PORT}`);
+    return send(res, 200, { code: c.code, expires: c.expires, addresses: lan });
   }
   if (p === '/pair/upgrade' && req.method === 'POST') {
     return readJson(req, res, body => {
@@ -763,6 +764,19 @@ const server = http.createServer((req, res) => {
   }
 
   if (p === '/backups' && req.method === 'GET') return send(res, 200, { ...backups.list(), epoch: EPOCH });
+
+  if (p === '/backups/info' && req.method === 'GET') {
+    const name = url.searchParams.get('name') || '';
+    const file = backups.fileOf(name);
+    if (!file) return send(res, 404, { error: 'no such backup' });
+    try {
+      const d = describeArchive(fs.readFileSync(file), name);
+      const src = d.manifest.source || {};
+      const since = src.epoch === EPOCH && Number.isFinite(src.maxSeq) ? db.prepare('SELECT COUNT(*) AS n FROM core WHERE seq > ?').get(src.maxSeq).n : null;
+      return send(res, 200, { name, created: d.manifest.createdMs || Date.parse(d.manifest.created) || 0, scope: d.manifest.scope, reason: d.manifest.reason,
+        live: d.live, analysis: d.analysis, changedSince: since, thisDatabase: src.epoch === EPOCH });
+    } catch (e) { return send(res, 400, { error: e.message }); }
+  }
 
   if (p === '/backups/now' && req.method === 'POST') {
     return readJson(req, res, body => {

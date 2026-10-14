@@ -1,6 +1,6 @@
 // "Update available": once a day the server looks at the releases of the GitHub repository its image is
 // built from (UPDATE_REPO, set when the image is built; "off" to never look) for a newer server release
-// (tags server-v<version>). It only tells: the Sync panel and the status page show it, nothing is updated by
+// (tags server-v<version>). It only tells: Uzikext's settings (⋮ → Sync) and the status page show it, nothing is updated by
 // itself. (Updating: Container Station → the container → Recreate, or `docker compose pull && docker compose up -d`.)
 const DAY = 24 * 60 * 60 * 1000;
 

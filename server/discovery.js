@@ -98,4 +98,4 @@ function startDiscovery({ port, getIdentity, log }) {
   return { stop: () => { try { sock.close(); } catch (e) {} } };
 }
 
-module.exports = { startDiscovery, parseQuestions, readName, encName, SERVICE };
+module.exports = { startDiscovery, parseQuestions, readName, encName, SERVICE, localV4 };

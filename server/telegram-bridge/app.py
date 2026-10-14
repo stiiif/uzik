@@ -898,6 +898,23 @@ async def sign_in(b: Login):
     return {"ok": True}
 
 
+@app.post("/api/logout")
+async def logout():
+    """Signs the bridge out of Telegram (Uzikext → Library → Telegram → Sign out). The channels' cached lists
+    stay; signing in again (with any account) picks them up."""
+    try:
+        await client.log_out()
+    except Exception:
+        pass
+    me_name.pop("v", None)
+    # a new client for the next sign-in (log_out disconnects this one)
+    try:
+        await client.connect()
+    except Exception:
+        pass
+    return {"ok": True}
+
+
 @app.get("/api/channels")
 async def channels():
     """Every channel/group of the account, with whether it's ticked and its cache state."""

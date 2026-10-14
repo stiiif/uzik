@@ -16,7 +16,7 @@ COPY telegram-bridge/static ./telegram-bridge/static
 # image works out of the box. A bind-mounted copy from the uzikext repo (docker-compose.yml) overrides it at
 # container start, so an algorithm edit in uzikext takes effect on a restart — no rebuild.
 # UPDATE_REPO: the GitHub repository this image is built from (owner/name): the server looks at its releases
-# once a day and says when a newer one exists (Sync panel, status page). Set by the build workflow.
+# once a day and says when a newer one exists (Uzikext's ⋮ → Sync, status page). Set by the build workflow.
 ARG UPDATE_REPO=""
 ENV UPDATE_REPO=${UPDATE_REPO}
 ENV PORT=8787

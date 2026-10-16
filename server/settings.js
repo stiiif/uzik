@@ -13,7 +13,7 @@ function createSettings({ getInfo, setInfo, defaults }) {
 
   function effective() {
     const d = defaults, s = stored;
-    const a = s.analysis || {}, b = s.backups || {}, k = b.keep || {}, m = s.music || {};
+    const a = s.analysis || {}, b = s.backups || {}, k = b.keep || {}, m = s.music || {}, t = s.telegram || {};
     return {
       name: s.name || d.name,
       analysis: {
@@ -33,7 +33,12 @@ function createSettings({ getInfo, setInfo, defaults }) {
       telegram: {
         apiId: (s.telegram && s.telegram.apiId) || d.telegram.apiId || '',
         apiHash: (s.telegram && s.telegram.apiHash) || d.telegram.apiHash || '',
-        from: s.telegram && s.telegram.apiId ? 'panel' : d.telegram.apiId ? 'env' : null
+        from: s.telegram && s.telegram.apiId ? 'panel' : d.telegram.apiId ? 'env' : null,
+        // the bridge's sync: how often the ticked channels are checked (minutes), how far back a channel's
+        // first scan goes (years, 0 = its whole history), how many files are tagged at once
+        refreshMinutes: clamp(t.refreshMinutes, 5, 1440, d.telegram.refreshMinutes || 60),
+        scanYears: clamp(t.scanYears, 0, 50, d.telegram.scanYears == null ? 3 : d.telegram.scanYears),
+        tagConcurrency: clamp(t.tagConcurrency, 1, 8, d.telegram.tagConcurrency || 3)
       },
       music: {
         dir: d.music.dir,
@@ -67,13 +72,26 @@ function createSettings({ getInfo, setInfo, defaults }) {
       }
     }
     if (p.telegram && typeof p.telegram === 'object') {
-      if (p.telegram.apiId == null && p.telegram.apiHash == null) delete next.telegram;
-      else {
-        const id = String(p.telegram.apiId || '').trim(), hash = String(p.telegram.apiHash || '').trim().toLowerCase();
-        if (!/^\d{3,12}$/.test(id)) throw new Error('the api_id is a number (my.telegram.org → API development tools)');
-        if (!/^[0-9a-f]{32}$/.test(hash)) throw new Error('the api_hash is 32 letters and digits (my.telegram.org → API development tools)');
-        next.telegram = { apiId: id, apiHash: hash };
+      const pt = p.telegram, sync = ['refreshMinutes', 'scanYears', 'tagConcurrency'];
+      next.telegram = next.telegram || {};
+      // the app ID: both given (set), or neither of the sync settings either (cleared)
+      if ('apiId' in pt || 'apiHash' in pt || !sync.some(key => key in pt)) {
+        if (pt.apiId == null && pt.apiHash == null) { delete next.telegram.apiId; delete next.telegram.apiHash; }
+        else {
+          const id = String(pt.apiId || '').trim(), hash = String(pt.apiHash || '').trim().toLowerCase();
+          if (!/^\d{3,12}$/.test(id)) throw new Error('the api_id is a number (my.telegram.org → API development tools)');
+          if (!/^[0-9a-f]{32}$/.test(hash)) throw new Error('the api_hash is 32 letters and digits (my.telegram.org → API development tools)');
+          next.telegram.apiId = id; next.telegram.apiHash = hash;
+        }
       }
+      // the sync settings (null: back to docker-compose's value, or the default)
+      for (const key of sync) {
+        if (!(key in pt)) continue;
+        if (pt[key] == null) delete next.telegram[key];
+        else if (Number.isFinite(Number(pt[key]))) next.telegram[key] = Number(pt[key]);
+        else throw new Error(`telegram.${key}: a number`);
+      }
+      if (!Object.keys(next.telegram).length) delete next.telegram;
     }
     if (p.music && typeof p.music === 'object' && 'roots' in p.music) {
       if (p.music.roots == null) delete (next.music = next.music || {}).roots;

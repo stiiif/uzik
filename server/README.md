@@ -262,8 +262,9 @@ ANALYSIS_MAX_DURATION_SEC: 1200   # ⋮ → Analysis → The server → Skip tra
 ANALYSIS_RESCAN_MS: 1800000       # how often the music folder is looked through (and matched again)
 TG_API_ID: ''                     # a Telegram app ID (normally entered in Uzikext: ⋮ → Library → Telegram → App ID)
 TG_API_HASH: ''
-REFRESH_MINUTES: 60               # the bridge: how often the ticked channels are checked for new posts
-SCAN_YEARS: 3                     # the bridge: how far back a newly ticked channel is scanned; 0 = all
+REFRESH_MINUTES: 60               # the bridge: how often the ticked channels are checked (⋮ → Library → Telegram → Sync)
+SCAN_YEARS: 3                     # the bridge: how far back a newly ticked channel is scanned; 0 = all (same place)
+TAG_CONCURRENCY: 3                # the bridge: how many files are tagged at once (same place)
 TELEGRAM_BRIDGE_URL: ''           # a bridge elsewhere instead (e.g. http://telegram-bridge:8788); "off": none
 TELEGRAM_BRIDGE_TOKEN: ''         # that bridge's SYNC_TOKEN (default: SYNC_TOKEN)
 UPDATE_REPO: ''                   # owner/name on GitHub, for "update available" (set by the image build); "off"

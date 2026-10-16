@@ -265,6 +265,9 @@ TG_API_HASH: ''
 REFRESH_MINUTES: 60               # the bridge: how often the ticked channels are checked (⋮ → Library → Telegram → Sync)
 SCAN_YEARS: 3                     # the bridge: how far back a newly ticked channel is scanned; 0 = all (same place)
 TAG_CONCURRENCY: 3                # the bridge: how many files are tagged at once (same place)
+WHILE_PLAYING: slow               # the bridge: while a track plays, the sync slows down, or "pause" (same place)
+STREAM_AHEAD: 3                   # the bridge: pieces of 512 KB fetched at once for a track (fast, not greedy)
+PIECE_CACHE_MB: 64                # the bridge: the latest pieces kept in memory (never on disk)
 TELEGRAM_BRIDGE_URL: ''           # a bridge elsewhere instead (e.g. http://telegram-bridge:8788); "off": none
 TELEGRAM_BRIDGE_TOKEN: ''         # that bridge's SYNC_TOKEN (default: SYNC_TOKEN)
 UPDATE_REPO: ''                   # owner/name on GitHub, for "update available" (set by the image build); "off"

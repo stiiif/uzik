@@ -22,8 +22,35 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
 from starlette.background import BackgroundTask
+
+# Telegram's encryption in C, not Python: Telethon uses cryptg when it's installed, else the system's OpenSSL
+# (found through ctypes.util.find_library, which can't see it on Alpine Linux, the server's image: helped here),
+# else plain Python (slow: a few hundred KB/s, and busy).
+import ctypes, ctypes.util as _ctu, sys
+_find_library = _ctu.find_library
+def _find_library_too(name):
+    found = _find_library(name)
+    if found or name != "ssl":
+        return found
+    # (only a library that really has the AES functions Telethon calls: libcrypto, or libssl through it)
+    dirs = ["/usr/lib", "/lib", "/usr/local/lib", "/usr/lib/x86_64-linux-gnu", "/usr/lib/aarch64-linux-gnu", os.path.dirname(sys.executable), os.path.join(sys.base_prefix, "DLLs")]
+    for d in dirs:
+        if not os.path.isdir(d):
+            continue
+        for f in sorted(os.listdir(d)):
+            if re.match(r"lib(crypto|ssl)([-.].*)?\.(so(\.\d+)*|dll)$", f):
+                try:
+                    lib = ctypes.CDLL(os.path.join(d, f))
+                    if hasattr(lib, "AES_ige_encrypt") and hasattr(lib, "AES_set_decrypt_key"):
+                        return os.path.join(d, f)
+                except OSError:
+                    pass
+    return None
+_ctu.find_library = _find_library_too
+
 from telethon import TelegramClient
-from telethon.errors import SessionPasswordNeededError
+from telethon.crypto import aes as _tl_aes
+from telethon.errors import FloodWaitError, SessionPasswordNeededError
 from telethon.tl.types import InputMessagesFilterDocument, InputMessagesFilterMusic
 
 
@@ -53,6 +80,11 @@ MIME_EXT = {"audio/mpeg": ".mp3", "audio/mp3": ".mp3", "audio/flac": ".flac", "a
             "audio/vnd.wave": ".wav"}
 MIN_KBPS, KBPS_TOLERANCE = 320, 0.94             # only used by the admin page's "Hide MP3 < 320 kbps" box
 CHUNK = 128 * 1024                               # divides 1 MB, so Telegram requests never cross a 1 MB boundary
+PIECE = 512 * 1024                               # what a track is fetched in: the largest request Telegram allows
+STREAM_AHEAD = max(env_int("STREAM_AHEAD", 3), 1)        # pieces fetched at once for a track: fast, not greedy
+PIECE_CACHE_MB = max(env_int("PIECE_CACHE_MB", 64), 8)   # the pieces kept in memory (never on disk)
+WHILE_PLAYING = "pause" if os.environ.get("WHILE_PLAYING", "").strip().lower() == "pause" else "slow"
+CRYPTO = "cryptg" if _tl_aes.cryptg else "openssl" if _tl_aes.libssl.decrypt_ige else "python"
 
 os.makedirs(LIB_DIR, exist_ok=True)
 client = TelegramClient(os.path.join(DATA_DIR, "session"), API_ID, API_HASH)
@@ -60,7 +92,11 @@ login_state = {}
 libs, jobs, tasks = {}, {}, set()
 sched = {"running": False, "current": None, "last_run": None, "next_run": None}
 msg_cache = {}   # (channel, msg_id) -> (time, message): seeking doesn't cost two API calls every time
-chunk_cache = OrderedDict()   # (channel, msg_id, chunk index) -> bytes: small Range reads (tag readers) hit this
+pieces = OrderedDict()        # (channel, msg_id, piece index) -> bytes: what's been fetched lately (memory only)
+pieces_bytes = [0]
+inflight = {}                 # (channel, msg_id, piece index) -> Future: a piece being fetched (shared, not fetched twice)
+dl_log = []                   # (start, end, bytes) of recent fetches: the download speed
+playing = {"n": 0, "last": 0.0}   # tracks being streamed now / when the last piece went out
 
 
 def now_iso():
@@ -515,8 +551,10 @@ async def read_tags(channel, entity, lib, job):
         if not m.file:
             mark_read(t, {})
             return
+        await sync_turn()
         async with sem:
             try:
+                await sync_turn()
                 mark_read(t, await read_fields(Remote(m.media, m.file.size), t.get("mp3", False)))
             except Exception:
                 pass  # network hiccup: left as is, retried on the next refresh
@@ -813,6 +851,8 @@ def build_manifest_v2():
 async def lifespan(_app):
     if not API_ID or not API_HASH:
         raise RuntimeError("TG_API_ID and TG_API_HASH must be set (get them at https://my.telegram.org)")
+    print(f"decryption: {CRYPTO}" + ("" if CRYPTO != "python" else " (slow: install cryptg)") +
+          f" · {STREAM_AHEAD} pieces of 512 KB at once · while a track plays, the sync {'pauses' if WHILE_PLAYING == 'pause' else 'slows down'}", flush=True)
     await client.connect()
     start_task(scheduler())
     yield
@@ -868,6 +908,11 @@ async def health():
             "lastRefresh": sched["last_run"], "nextRefresh": sched["next_run"]}
 
 
+def transfer_info():
+    return {"crypto": CRYPTO, "downloadSpeed": download_speed(), "whilePlaying": WHILE_PLAYING,
+            "streamAhead": STREAM_AHEAD, "playing": playback_active(), "tagConcurrency": TAG_CONCURRENCY}
+
+
 @app.get("/api/status")
 async def status():
     authorized = await client.is_user_authorized()
@@ -876,7 +921,7 @@ async def status():
         u = await client.get_me()
         me = " ".join(x for x in (u.first_name, u.last_name) if x) or u.username
     return {"authorized": authorized, "me": me, "refreshMinutes": REFRESH_MINUTES,
-            "scanYears": SCAN_YEARS or None, "sched": sched}
+            "scanYears": SCAN_YEARS or None, "sched": sched, **transfer_info()}
 
 
 @app.post("/api/send_code")
@@ -997,7 +1042,7 @@ async def stats():
                     "updated": (lib or {}).get("updated"), "years": (lib or {}).get("years"), "job": job})
     out.sort(key=lambda c: c["title"].lower())
     return {"authorized": authorized, "me": me_name.get("v"), "refreshMinutes": REFRESH_MINUTES,
-            "scanYears": SCAN_YEARS or None, "sched": sched, "channels": out}
+            "scanYears": SCAN_YEARS or None, "sched": sched, "channels": out, **transfer_info()}
 
 
 @app.post("/api/refresh_all")
@@ -1114,19 +1159,95 @@ async def search_all(q: str = "", field: str = "all", hq: bool = False):
 
 
 # ---------- audio ----------
-async def cached_chunk(channel, msg_id, m, idx):
+# A track is fetched from Telegram in 512 KB pieces, a few at once (STREAM_AHEAD), in order. A piece is fetched
+# once: a second request for it (the player and the waveform, a seek, the next track fetched ahead) waits for
+# the same fetch. The latest pieces stay in memory (PIECE_CACHE_MB), never on disk.
+async def fetch_piece(m, idx):
+    for attempt in range(4):
+        try:
+            async for c in client.iter_download(m.media, offset=idx * PIECE, request_size=PIECE):
+                return bytes(c)
+            return b""
+        except FloodWaitError as e:              # Telegram asks to wait: wait (no hammering)
+            await asyncio.sleep(min(e.seconds, 30) + 1)
+        except (ConnectionError, asyncio.TimeoutError, OSError):
+            await asyncio.sleep(0.5 * (attempt + 1))
+    raise HTTPException(503, "Telegram didn't send this part of the track")
+
+
+def note_speed(t0, t1, n):
+    dl_log.append((t0, t1, n))
+    while len(dl_log) > 60 or (dl_log and t1 - dl_log[0][1] > 30):
+        dl_log.pop(0)
+
+
+def download_speed():
+    """Bytes per second over the recent fetches (they overlap: bytes over the time they spanned), or None."""
+    if not dl_log:
+        return None
+    span = max(e[1] for e in dl_log) - min(e[0] for e in dl_log)
+    total = sum(e[2] for e in dl_log)
+    return round(total / span) if span > 0.05 and total >= PIECE else None
+
+
+async def piece(channel, msg_id, m, idx):
     key = (channel, msg_id, idx)
-    if key in chunk_cache:
-        chunk_cache.move_to_end(key)
-        return chunk_cache[key]
-    data = b""
-    async for c in client.iter_download(m.media, offset=idx * CHUNK, request_size=CHUNK):
-        data = bytes(c)
-        break
-    chunk_cache[key] = data
-    while len(chunk_cache) > 96:                 # ~12 MB
-        chunk_cache.popitem(last=False)
-    return data
+    if key in pieces:
+        pieces.move_to_end(key)
+        return pieces[key]
+    if key in inflight:
+        return await asyncio.shield(inflight[key])
+    fut = asyncio.get_running_loop().create_future()
+    inflight[key] = fut
+    try:
+        t0 = time.monotonic()
+        data = await fetch_piece(m, idx)
+        note_speed(t0, time.monotonic(), len(data))
+        pieces[key] = data
+        pieces_bytes[0] += len(data)
+        while pieces_bytes[0] > PIECE_CACHE_MB * 1048576 and len(pieces) > 1:
+            pieces_bytes[0] -= len(pieces.popitem(last=False)[1])
+        fut.set_result(data)
+        return data
+    except BaseException as e:
+        if not fut.done():
+            fut.set_exception(e if isinstance(e, Exception) else RuntimeError("cancelled"))
+            fut.exception()                       # (read: no "never retrieved" warning)
+        raise
+    finally:
+        inflight.pop(key, None)
+
+
+async def pieces_from(channel, msg_id, m, first, last):
+    """Pieces first..last in order, STREAM_AHEAD of them being fetched at any time."""
+    ahead = {}
+    nxt = first
+    try:
+        for idx in range(first, last + 1):
+            while nxt <= last and nxt < idx + STREAM_AHEAD:
+                ahead[nxt] = asyncio.ensure_future(piece(channel, msg_id, m, nxt))
+                nxt += 1
+            yield await ahead.pop(idx)
+    finally:
+        for t in ahead.values():
+            t.cancel()
+
+
+def playback_active():
+    return playing["n"] > 0 or time.monotonic() - playing["last"] < 8
+
+
+slow_turn = asyncio.Lock()
+
+
+async def sync_turn():
+    """Before each file the sync reads: while a track plays, the sync pauses (WHILE_PLAYING=pause) or slows
+    down (one file at a time, a second apart): the track comes first."""
+    while WHILE_PLAYING == "pause" and playback_active():
+        await asyncio.sleep(1)
+    if playback_active():
+        async with slow_turn:
+            await asyncio.sleep(1)
 
 
 @app.api_route("/stream/{channel}/{msg_id}", methods=["GET", "HEAD"])
@@ -1160,45 +1281,44 @@ async def stream(channel: int, msg_id: int, request: Request, dl: bool = False):
     if request.method == "HEAD":
         return Response(status_code=status, headers=headers, media_type=media_type)
 
-    if end - start + 1 <= 4 * CHUNK:
-        # Small reads (Uzikext's tag reader asks for a few KB at a time): serve from cached 128 KB chunks
-        # instead of fetching a fresh chunk from Telegram for every request.
-        try:
-            out = bytearray()
-            pos = start
-            while pos <= end:
-                idx, rel = divmod(pos, CHUNK)
-                c = await cached_chunk(channel, msg_id, m, idx)
-                if not c:
-                    break
-                piece = c[rel: rel + (end - pos + 1)]
-                out += piece
-                pos += len(piece)
-        except Exception:
-            msg_cache.pop((channel, msg_id), None)
-            raise
-        return Response(bytes(out), status_code=status, headers=headers, media_type=media_type)
-
     async def gen():
-        aligned = start - start % CHUNK
-        skip = start - aligned
-        remaining = end - start + 1
+        playing["n"] += 1
         try:
-            async for chunk in client.iter_download(m.media, offset=aligned, request_size=CHUNK):
-                if skip:
-                    chunk, skip = chunk[skip:], 0
-                if len(chunk) > remaining:
-                    chunk = chunk[:remaining]
-                remaining -= len(chunk)
-                if chunk:
-                    yield chunk
-                if remaining <= 0:
+            first, last = start // PIECE, end // PIECE
+            pos = first * PIECE
+            async for data in pieces_from(channel, msg_id, m, first, last):
+                playing["last"] = time.monotonic()
+                lo, hi = max(start, pos), min(end + 1, pos + len(data))
+                if hi > lo:
+                    yield data[lo - pos: hi - pos]
+                if not data:
                     break
+                pos += len(data)
         except Exception:
             msg_cache.pop((channel, msg_id), None)   # e.g. expired file reference: refetch next time
             raise
+        finally:
+            playing["n"] -= 1
+            playing["last"] = time.monotonic()
 
     return StreamingResponse(gen(), status_code=status, headers=headers, media_type=media_type)
+
+
+@app.post("/api/prefetch/{channel}/{msg_id}")
+async def prefetch(channel: int, msg_id: int, size: int = 2 * 1048576):
+    """The start of a track (`size` bytes, 2 MB by default: about a minute of MP3) fetched into memory now, so
+    it starts at once when it's played. Nothing is kept on disk."""
+    m = await get_message(channel, msg_id)
+    if not m or not m.file:
+        raise HTTPException(404)
+    last = min(max(size, 1), m.file.size) // PIECE
+
+    async def run():
+        playing["last"] = time.monotonic()
+        async for _ in pieces_from(channel, msg_id, m, 0, last):
+            pass
+    start_task(run())
+    return {"ok": True, "pieces": last + 1}
 
 
 @app.get("/api/zip/{channel}")

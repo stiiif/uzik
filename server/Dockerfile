@@ -5,9 +5,13 @@ RUN apk add --no-cache ffmpeg python3
 # The Telegram bridge (telegram-bridge/, Python), run by the server itself once the user has entered their
 # own Telegram app ID in Uzikext (Sync → On the server → Telegram). In its own Python environment.
 COPY telegram-bridge/requirements.txt /tmp/tg-requirements.txt
-RUN apk add --no-cache --virtual .build gcc musl-dev python3-dev libffi-dev \
+# cryptg: Telegram's decryption in compiled code (hundreds of MB/s, against well under 1 MB/s in plain Python).
+# Alpine has no ready-made build of it, so it's compiled here (Rust); if that fails, the bridge uses the
+# system's OpenSSL instead (about 6 MB/s, still plenty for playing tracks).
+RUN apk add --no-cache --virtual .build gcc musl-dev python3-dev libffi-dev cargo \
  && python3 -m venv /opt/tg && /opt/tg/bin/pip install --no-cache-dir -r /tmp/tg-requirements.txt \
- && apk del .build && rm /tmp/tg-requirements.txt
+ && (/opt/tg/bin/pip install --no-cache-dir cryptg || echo "cryptg not built: the bridge decrypts with OpenSSL") \
+ && apk del .build && rm -rf /tmp/tg-requirements.txt /root/.cargo
 WORKDIR /app
 COPY *.js ./
 COPY telegram-bridge/app.py telegram-bridge/requirements.txt ./telegram-bridge/

@@ -61,7 +61,7 @@ const { startBridge, bundledBridge } = require('./telegram-runner.js');
 const { startUpdateCheck } = require('./update-check.js');
 const { statusPage } = require('./status-page.js');
 const SERVER_VERSION = 4;            // the protocol, what Uzikext checks
-const SERVER_RELEASE = '4.2.1';      // this release (the update check compares it)
+const SERVER_RELEASE = '4.2.2';      // this release (the update check compares it)
 
 const PORT = Number(process.env.PORT) || 8787;
 // Inside the Uzikext app (SERVER_MODE=app): the app starts this server, listening on this computer only
@@ -362,7 +362,8 @@ const settings = createSettings({ getInfo, setInfo, defaults: {
     // (docker-compose's starting values for the bridge's sync; ⋮ → Library → Telegram → Sync changes them)
     refreshMinutes: Number(process.env.REFRESH_MINUTES) || 60,
     scanYears: process.env.SCAN_YEARS != null && process.env.SCAN_YEARS !== '' && Number.isFinite(Number(process.env.SCAN_YEARS)) ? Number(process.env.SCAN_YEARS) : 3,
-    tagConcurrency: Number(process.env.TAG_CONCURRENCY) || 3 },
+    tagConcurrency: Number(process.env.TAG_CONCURRENCY) || 3,
+    whilePlaying: process.env.WHILE_PLAYING === 'pause' ? 'pause' : 'slow' },
   notCopy: [path.resolve(DATA_DIR), MUSIC_DIR && path.resolve(MUSIC_DIR)]
 } });
 const auth = createAuth({ db, getInfo, setInfo, legacyToken: TOKEN, log: msg => console.log(`[pairing] ${msg}`) });
@@ -414,7 +415,7 @@ function applyTelegram() {
     }
     const t = settings.effective().telegram;
     // (the sync settings are part of it: a change restarts the bridge, which stays signed in)
-    const key = bundled && t.apiId && t.apiHash ? `${t.apiId}:${t.apiHash}:${t.refreshMinutes}:${t.scanYears}:${t.tagConcurrency}` : '';
+    const key = bundled && t.apiId && t.apiHash ? `${t.apiId}:${t.apiHash}:${t.refreshMinutes}:${t.scanYears}:${t.tagConcurrency}:${t.whilePlaying}` : '';
     if (key === tgRunningWith) return;
     tgRunningWith = key;
     if (bridgeRunner) { const r = bridgeRunner; bridgeRunner = null; await r.stop(); }
@@ -424,7 +425,7 @@ function applyTelegram() {
     tg.reconfigure({ url: `http://127.0.0.1:${TG_PORT}`, token: BRIDGE_TOKEN });
     bridgeRunner = startBridge({ dir: bundled, python: process.env.TELEGRAM_PYTHON || '/opt/tg/bin/python', dataDir: path.join(DATA_DIR, 'telegram'), port: TG_PORT,
       token: BRIDGE_TOKEN, apiId: t.apiId, apiHash: t.apiHash, log: msg => console.log(`[telegram] ${msg}`), onReady: () => tg.probe(),
-      env: { REFRESH_MINUTES: String(t.refreshMinutes), SCAN_YEARS: String(t.scanYears), TAG_CONCURRENCY: String(t.tagConcurrency) } });
+      env: { REFRESH_MINUTES: String(t.refreshMinutes), SCAN_YEARS: String(t.scanYears), TAG_CONCURRENCY: String(t.tagConcurrency), WHILE_PLAYING: t.whilePlaying } });
     console.log(`[telegram] the built-in bridge, Telegram app ${t.apiId} (data in ${path.join(DATA_DIR, 'telegram')})`);
   }).catch(e => console.error('[telegram]', e.message));
   return tgSwitching;
@@ -553,8 +554,8 @@ function fullSettings() {
   const e = settings.effective();
   const st = settings.stored().telegram || {};
   const shown = { ...e, telegram: { apiId: e.telegram.apiId || null, from: e.telegram.from, hasHash: !!e.telegram.apiHash,
-    refreshMinutes: e.telegram.refreshMinutes, scanYears: e.telegram.scanYears, tagConcurrency: e.telegram.tagConcurrency,
-    syncFrom: Object.fromEntries(['refreshMinutes', 'scanYears', 'tagConcurrency'].map(k => [k, st[k] != null ? 'panel' : process.env[{ refreshMinutes: 'REFRESH_MINUTES', scanYears: 'SCAN_YEARS', tagConcurrency: 'TAG_CONCURRENCY' }[k]] ? 'env' : 'default'])),
+    refreshMinutes: e.telegram.refreshMinutes, scanYears: e.telegram.scanYears, tagConcurrency: e.telegram.tagConcurrency, whilePlaying: e.telegram.whilePlaying,
+    syncFrom: Object.fromEntries(['refreshMinutes', 'scanYears', 'tagConcurrency', 'whilePlaying'].map(k => [k, st[k] != null ? 'panel' : process.env[{ refreshMinutes: 'REFRESH_MINUTES', scanYears: 'SCAN_YEARS', tagConcurrency: 'TAG_CONCURRENCY', whilePlaying: 'WHILE_PLAYING' }[k]] ? 'env' : 'default'])),
     bridge: tgMode } };
   return { settings: shown, defaults: null, music: musicState(), mounts: mounts([path.resolve(DATA_DIR), MUSIC_DIR && path.resolve(MUSIC_DIR)]),
     network: { allowFrom: guard.mode, bind: BIND || 'all' }, mode: SERVER_MODE, legacyToken: auth.legacy(), telegram: tgState(), update: updates.state() };

@@ -38,7 +38,9 @@ function createSettings({ getInfo, setInfo, defaults }) {
         // first scan goes (years, 0 = its whole history), how many files are tagged at once
         refreshMinutes: clamp(t.refreshMinutes, 5, 1440, d.telegram.refreshMinutes || 60),
         scanYears: clamp(t.scanYears, 0, 50, d.telegram.scanYears == null ? 3 : d.telegram.scanYears),
-        tagConcurrency: clamp(t.tagConcurrency, 1, 8, d.telegram.tagConcurrency || 3)
+        tagConcurrency: clamp(t.tagConcurrency, 1, 8, d.telegram.tagConcurrency || 3),
+        // while a track plays, the sync slows down ('slow') or waits ('pause')
+        whilePlaying: t.whilePlaying === 'pause' || t.whilePlaying === 'slow' ? t.whilePlaying : (d.telegram.whilePlaying === 'pause' ? 'pause' : 'slow')
       },
       music: {
         dir: d.music.dir,
@@ -72,7 +74,7 @@ function createSettings({ getInfo, setInfo, defaults }) {
       }
     }
     if (p.telegram && typeof p.telegram === 'object') {
-      const pt = p.telegram, sync = ['refreshMinutes', 'scanYears', 'tagConcurrency'];
+      const pt = p.telegram, sync = ['refreshMinutes', 'scanYears', 'tagConcurrency', 'whilePlaying'];
       next.telegram = next.telegram || {};
       // the app ID: both given (set), or neither of the sync settings either (cleared)
       if ('apiId' in pt || 'apiHash' in pt || !sync.some(key => key in pt)) {
@@ -88,6 +90,7 @@ function createSettings({ getInfo, setInfo, defaults }) {
       for (const key of sync) {
         if (!(key in pt)) continue;
         if (pt[key] == null) delete next.telegram[key];
+        else if (key === 'whilePlaying') { if (pt[key] !== 'slow' && pt[key] !== 'pause') throw new Error('telegram.whilePlaying: slow or pause'); next.telegram[key] = pt[key]; }
         else if (Number.isFinite(Number(pt[key]))) next.telegram[key] = Number(pt[key]);
         else throw new Error(`telegram.${key}: a number`);
       }

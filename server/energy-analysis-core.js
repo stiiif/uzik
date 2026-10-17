@@ -207,8 +207,29 @@
     [/\bdub\b|reggae|dancehall|ska/i, 72, 0.2],
     [/downtempo|chill[\s_-]*out|ambient/i, 100, 0.35]
   ];
-  function tempoPrior(genre) {
-    if (genre) for (const [re, centre, sigma] of TEMPO_GENRES) if (re.test(genre)) return { centre, sigma, fromGenre: true };
+  // Proposed (being measured: Settings → Analysis → Check the BPMs, "Try the proposed method"): electro out of
+  // the techno group (it runs from ~120 to ~160), techno a little wider, hard techno on its own (~150, not 170)
+  const TEMPO_GENRES_PROPOSED = [
+    [/drum[\s_-]*(&|and|n|'n')?[\s_-]*bass|\bdnb\b|\bd&b\b|jungle|neuro(funk)?|liquid[\s_-]*funk|jump[\s_-]?up/i, 174, 0.1],
+    [/footwork|juke/i, 160, 0.12],
+    [/dubstep|riddim|brostep|grime/i, 140, 0.12],
+    [/\btrap\b|drill/i, 140, 0.2],
+    [/hard[\s_-]*techno/i, 150, 0.08],
+    [/hardcore|gabber|hardstyle|frenchcore/i, 170, 0.15],
+    [/psy[\s_-]*trance|goa/i, 147, 0.08],
+    [/trance/i, 139, 0.06],
+    [/hard[\s_-]*dance/i, 147, 0.12],
+    [/techno|minimal|industrial/i, 128, 0.14],
+    [/deep[\s_-]*house/i, 122, 0.08],
+    [/house|garage|uk[\s_-]*funky/i, 127, 0.1],
+    [/nu[\s_-]*disco|indie[\s_-]*dance|disco/i, 118, 0.15],
+    [/breakbeat|breaks|big[\s_-]*beat/i, 138, 0.12],
+    [/hip[\s_-]?hop|\brap\b|boom[\s_-]?bap|lo[\s_-]?fi|trip[\s_-]?hop/i, 90, 0.18],
+    [/\bdub\b|reggae|dancehall|ska/i, 72, 0.2],
+    [/downtempo|chill[\s_-]*out|ambient/i, 100, 0.35]
+  ];
+  function tempoPrior(genre, table) {
+    if (genre) for (const [re, centre, sigma] of (table || TEMPO_GENRES)) if (re.test(genre)) return { centre, sigma, fromGenre: true };
     return { centre: 128, sigma: 0.5, fromGenre: false };
   }
   function tempoOnsetCurve(data, sampleRate) {
@@ -248,9 +269,11 @@
     }
     return out;
   }
+  // opts.genre: the track's genre (see TEMPO_GENRES). opts.method: 'proposed' = the genre only settles a
+  // choice between a tempo, its double and its half (and the proposed genre table); a clear tempo found
+  // without the genre wins over a different one the genre prefers (e.g. a 150 BPM electro track read as 120
+  // because electro sat with techno around 127). Being measured before it replaces the current one.
   function estimateTempo(data, sampleRate, opts) {
-    const prior = tempoPrior(opts && opts.genre);
-    const SUBDIV = 0.7;
     // the middle 2 minutes (what was tested; skips long intros/outros; bounded cost on long mixes)
     const maxLen = Math.round(120 * sampleRate);
     if (data.length > maxLen) { const start = Math.floor((data.length - maxLen) / 2); data = data.subarray(start, start + maxLen); }
@@ -258,6 +281,18 @@
     if (df.length < 300) return null;                       // under ~3.5 s: can't see a bar repeat
     const sm = new Float32Array(df.length);
     for (let i = 0; i < df.length; i++) sm[i] = (df[Math.max(0, i - 1)] + 2 * df[i] + df[Math.min(df.length - 1, i + 1)]) / 4;
+    const genre = opts && opts.genre;
+    if (!(opts && opts.method === 'proposed')) return scoreTempo(sm, frameSec, tempoPrior(genre));
+    const plain = scoreTempo(sm, frameSec, tempoPrior(''));
+    const prior = tempoPrior(genre, TEMPO_GENRES_PROPOSED);
+    if (!prior.fromGenre || !plain) return plain;
+    const withGenre = scoreTempo(sm, frameSec, prior);
+    if (!withGenre) return plain;
+    const octave = [1, 2, 0.5].some(r => Math.abs(Math.log2(withGenre.bpm / (plain.bpm * r))) < 0.03);
+    return octave || withGenre.conf >= plain.conf ? withGenre : plain;
+  }
+  function scoreTempo(sm, frameSec, prior) {
+    const SUBDIV = 0.7;
     const bpms = []; for (let b = 60; b <= 200; b += 0.5) bpms.push(b);
     const periods = bpms.map(b => 60 / b / frameSec);
     const weight = bpms.map(b => { const z = Math.log2(b / prior.centre) / prior.sigma; return Math.exp(-0.5 * z * z); });

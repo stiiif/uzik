@@ -50,7 +50,9 @@ _ctu.find_library = _find_library_too
 
 from telethon import TelegramClient
 from telethon.crypto import aes as _tl_aes
-from telethon.errors import FloodWaitError, SessionPasswordNeededError
+from telethon.errors import (FloodWaitError, SessionPasswordNeededError, AuthKeyUnregisteredError, SessionRevokedError,
+                             SessionExpiredError, AuthKeyInvalidError, AuthKeyDuplicatedError, UserDeactivatedError,
+                             UserDeactivatedBanError)
 from telethon.tl.types import InputMessagesFilterDocument, InputMessagesFilterMusic
 
 
@@ -89,6 +91,13 @@ CRYPTO = "cryptg" if _tl_aes.cryptg else "openssl" if _tl_aes.libssl.decrypt_ige
 os.makedirs(LIB_DIR, exist_ok=True)
 client = TelegramClient(os.path.join(DATA_DIR, "session"), API_ID, API_HASH)
 login_state = {}
+# Telegram ended this server's session (ended from the account's Devices list, expired, used from two places at
+# once, the account deactivated): every call fails from then on. Noticed once, the bridge says so (status:
+# not signed in, and why) and starts a fresh session, ready to sign in again.
+SIGNED_OUT = (AuthKeyUnregisteredError, SessionRevokedError, SessionExpiredError, AuthKeyInvalidError,
+              AuthKeyDuplicatedError, UserDeactivatedError, UserDeactivatedBanError)
+signed_out = {}               # {"reason", "at"} until someone signs in again
+_forget_lock = asyncio.Lock()
 libs, jobs, tasks = {}, {}, set()
 sched = {"running": False, "current": None, "last_run": None, "next_run": None}
 msg_cache = {}   # (channel, msg_id) -> (time, message): seeking doesn't cost two API calls every time
@@ -200,6 +209,50 @@ def _manifest_bytes(fmt):
 
 
 # ---------- Telegram helpers ----------
+def signed_out_reason(e):
+    if isinstance(e, AuthKeyDuplicatedError):
+        return "Telegram ended this server's session: it was used from two places at once"
+    if isinstance(e, SessionExpiredError):
+        return "Telegram ended this server's session: it expired"
+    if isinstance(e, (UserDeactivatedError, UserDeactivatedBanError)):
+        return "Telegram says this account is deactivated or banned"
+    return "Telegram ended this server's session (from the account's Devices list, or by Telegram itself)"
+
+
+async def forget_session(e):
+    """Telegram dropped the session: say so, and start a fresh one (signing in again then works)."""
+    async with _forget_lock:
+        if signed_out and client._authorized is False:
+            return
+        signed_out.update(reason=signed_out_reason(e), at=now_iso(), error=type(e).__name__)
+        print(f"signed out by Telegram ({type(e).__name__}): sign in again (Uzikext: Library → Telegram)", flush=True)
+        client._authorized = False
+        me_name.pop("v", None)
+        msg_cache.clear()
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+        try:
+            client.session.auth_key = None       # (a new key on the next connect: the old one is dead)
+            client.session.save()
+        except Exception:
+            pass
+        try:
+            await client.connect()
+        except Exception as e2:
+            print(f"reconnecting: {e2!r}", flush=True)
+
+
+async def authorized_now():
+    """Signed in, as far as Telegram says (a dropped session noticed here too)."""
+    try:
+        return await client.is_user_authorized()
+    except SIGNED_OUT as e:
+        await forget_session(e)
+        return False
+
+
 async def get_entity(channel):
     try:
         return await client.get_entity(channel)
@@ -656,6 +709,8 @@ async def scan_job(channel: int, full: bool):
     except Exception as e:
         job["error"] = str(e)
         print(f"[scan {channel}] {e!r}", flush=True)
+        if isinstance(e, SIGNED_OUT):
+            start_task(forget_session(e))
     finally:
         job["running"] = False
         job["finished"] = now_iso()
@@ -669,7 +724,7 @@ async def run_scan(channel, full=False):
 
 
 async def refresh_all():
-    if sched["running"] or not await client.is_user_authorized():
+    if sched["running"] or not await authorized_now():
         return
     sched["running"] = True
     try:
@@ -686,6 +741,8 @@ async def scheduler():
     while True:
         try:
             await refresh_all()
+        except SIGNED_OUT as e:
+            await forget_session(e)
         except Exception as e:
             print(f"[refresh] {e!r}", flush=True)
         sched["next_run"] = (datetime.now() + timedelta(minutes=REFRESH_MINUTES)).isoformat(timespec="seconds")
@@ -862,6 +919,15 @@ async def lifespan(_app):
 
 
 app = FastAPI(lifespan=lifespan)
+
+
+async def _signed_out_answer(_request, e):
+    await forget_session(e)
+    return JSONResponse({"error": "signed_out", "reason": signed_out.get("reason")}, status_code=503)
+
+
+for _cls in SIGNED_OUT:
+    app.add_exception_handler(_cls, _signed_out_answer)
 CORS = {"Access-Control-Allow-Origin": "*",
         "Access-Control-Allow-Headers": "Authorization, Content-Type, Range, If-None-Match",
         "Access-Control-Allow-Methods": "GET, HEAD, POST, OPTIONS",
@@ -904,7 +970,7 @@ async def index():
 
 @app.get("/health")
 async def health():
-    return {"ok": True, "authorized": await client.is_user_authorized(), "channels": len(selected()),
+    return {"ok": True, "authorized": await authorized_now(), "channels": len(selected()),
             "lastRefresh": sched["last_run"], "nextRefresh": sched["next_run"]}
 
 
@@ -915,12 +981,17 @@ def transfer_info():
 
 @app.get("/api/status")
 async def status():
-    authorized = await client.is_user_authorized()
+    authorized = await authorized_now()
     me = None
     if authorized:
-        u = await client.get_me()
-        me = " ".join(x for x in (u.first_name, u.last_name) if x) or u.username
-    return {"authorized": authorized, "me": me, "refreshMinutes": REFRESH_MINUTES,
+        try:
+            u = await client.get_me()
+            me = " ".join(x for x in (u.first_name, u.last_name) if x) or u.username
+        except SIGNED_OUT as e:
+            await forget_session(e)
+            authorized = False
+    return {"authorized": authorized, "me": me, "signedOut": None if authorized else signed_out.get("reason"),
+            "refreshMinutes": REFRESH_MINUTES,
             "scanYears": SCAN_YEARS or None, "sched": sched, **transfer_info()}
 
 
@@ -939,6 +1010,7 @@ async def sign_in(b: Login):
         if not b.password:
             return {"need_password": True}
         await client.sign_in(password=b.password)
+    signed_out.clear()
     start_task(refresh_all())
     return {"ok": True}
 
@@ -1013,10 +1085,14 @@ me_name = {}
 async def stats():
     """Summary for Uzikext's "Telegram bridge" view: refresh schedule, and per channel how many tracks
     there are, how many files have been read, how many are complete and which fields are missing."""
-    authorized = await client.is_user_authorized()
+    authorized = await authorized_now()
     if authorized and "v" not in me_name:
-        u = await client.get_me()
-        me_name["v"] = " ".join(x for x in (u.first_name, u.last_name) if x) or u.username
+        try:
+            u = await client.get_me()
+            me_name["v"] = " ".join(x for x in (u.first_name, u.last_name) if x) or u.username
+        except SIGNED_OUT as e:
+            await forget_session(e)
+            authorized = False
     out = []
     for ch, info in selected().items():
         lib = load_lib(ch)
@@ -1041,7 +1117,8 @@ async def stats():
                     "complete": complete, "missing": dict(missing),
                     "updated": (lib or {}).get("updated"), "years": (lib or {}).get("years"), "job": job})
     out.sort(key=lambda c: c["title"].lower())
-    return {"authorized": authorized, "me": me_name.get("v"), "refreshMinutes": REFRESH_MINUTES,
+    return {"authorized": authorized, "me": me_name.get("v"), "signedOut": None if authorized else signed_out.get("reason"),
+            "refreshMinutes": REFRESH_MINUTES,
             "scanYears": SCAN_YEARS or None, "sched": sched, "channels": out, **transfer_info()}
 
 
@@ -1172,6 +1249,9 @@ async def fetch_piece(m, idx):
             await asyncio.sleep(min(e.seconds, 30) + 1)
         except (ConnectionError, asyncio.TimeoutError, OSError):
             await asyncio.sleep(0.5 * (attempt + 1))
+        except SIGNED_OUT as e:                  # (mid-track: noticed here too)
+            start_task(forget_session(e))
+            raise HTTPException(503, signed_out_reason(e))
     raise HTTPException(503, "Telegram didn't send this part of the track")
 
 

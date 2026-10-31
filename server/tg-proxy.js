@@ -9,14 +9,15 @@ const PASS_RES = ['content-type', 'content-length', 'content-range', 'accept-ran
 
 function createTgProxy({ url, token, log }) {
   let off, base, lib;
-  const state = { configured: false, url: null, reachable: null, authorized: null, checkedAt: 0, error: null };
+  // signedOut: why Telegram ended the bridge's session (it's running, not signed in: sign in again)
+  const state = { configured: false, url: null, reachable: null, authorized: null, signedOut: null, checkedAt: 0, error: null };
   // where the bridge is (and its token); changed when the bridge is started or stopped
   function reconfigure(next) {
     url = next.url; token = next.token;
     off = !url || url === 'off';
     base = off ? null : new URL(url.replace(/\/+$/, '') + '/');
     lib = base && base.protocol === 'https:' ? https : http;
-    Object.assign(state, { configured: !off, url: off ? null : base.origin, reachable: null, authorized: null, error: null });
+    Object.assign(state, { configured: !off, url: off ? null : base.origin, reachable: null, authorized: null, signedOut: null, error: null });
   }
   reconfigure({ url, token });
 
@@ -39,7 +40,7 @@ function createTgProxy({ url, token, log }) {
         res.on('data', c => { body += c; });
         res.on('end', () => {
           let j = null; try { j = JSON.parse(body); } catch (e) {}
-          Object.assign(state, { reachable: res.statusCode < 500, authorized: j ? !!j.authorized : null, checkedAt: Date.now(),
+          Object.assign(state, { reachable: res.statusCode < 500, authorized: j ? !!j.authorized : null, signedOut: (j && j.signedOut) || null, checkedAt: Date.now(),
             error: res.statusCode === 401 ? "the bridge refused this server's token (TELEGRAM_BRIDGE_TOKEN = the bridge's SYNC_TOKEN)" : res.statusCode >= 400 ? `HTTP ${res.statusCode}` : null });
           resolve(state);
         });
@@ -67,7 +68,8 @@ function createTgProxy({ url, token, log }) {
       for (const k of PASS_RES) if (r.headers[k] != null) h[k] = r.headers[k];
       res.writeHead(r.statusCode, h);
       r.pipe(res);
-      if (/^\/api\/(sign_in|status|send_code)/.test(rest)) r.on('end', () => setTimeout(probe, 500));
+      // (signed in or out: the state again at once; Telegram ending the session shows as a 503 on any call)
+      if (/^\/api\/(sign_in|status|send_code|logout)/.test(rest) || r.statusCode === 503) r.on('end', () => setTimeout(probe, 500));
     });
     up.on('timeout', () => up.destroy(new Error('the bridge took too long')));
     up.on('error', e => {

@@ -62,7 +62,7 @@ const { startBridge, bundledBridge } = require('./telegram-runner.js');
 const { startUpdateCheck } = require('./update-check.js');
 const { statusPage } = require('./status-page.js');
 const SERVER_VERSION = 4;            // the protocol, what Uzikext checks
-const SERVER_RELEASE = '4.2.4';      // this release (the update check compares it)
+const SERVER_RELEASE = '4.2.5';      // this release (the update check compares it)
 
 const PORT = Number(process.env.PORT) || 8787;
 // Inside the Uzikext app (SERVER_MODE=app): the app starts this server, listening on this computer only
@@ -415,8 +415,9 @@ function applyTelegram() {
       return;
     }
     const t = settings.effective().telegram;
-    // (the sync settings are part of it: a change restarts the bridge, which stays signed in)
-    const key = bundled && t.apiId && t.apiHash ? `${t.apiId}:${t.apiHash}:${t.refreshMinutes}:${t.scanYears}:${t.tagConcurrency}:${t.whilePlaying}` : '';
+    // (the sync settings are part of it: a change restarts the bridge, which stays signed in; not the default scan
+    // depth: Uzikext tells the running bridge, which starts reading back)
+    const key = bundled && t.apiId && t.apiHash ? `${t.apiId}:${t.apiHash}:${t.refreshMinutes}:${t.tagConcurrency}:${t.whilePlaying}` : '';
     if (key === tgRunningWith) return;
     tgRunningWith = key;
     if (bridgeRunner) { const r = bridgeRunner; bridgeRunner = null; await r.stop(); }

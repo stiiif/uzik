@@ -20,7 +20,7 @@ from urllib.parse import quote
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 
 # Telegram's encryption in C, not Python: Telethon uses cryptg when it's installed, else the system's OpenSSL
@@ -657,6 +657,82 @@ def new_job():
             "tag_done": 0, "tag_total": 0, "error": None, "started": now_iso()}
 
 
+def years_cutoff(years):
+    """The date `years` back (None / 0: no limit)."""
+    return datetime.now(timezone.utc) - timedelta(days=365 * years) if years else None
+
+
+def lib_oldest(lib):
+    """The date of the oldest track of a channel (kept in the library, so the lists stay cheap)."""
+    if not lib:
+        return None
+    if lib.get("oldest") is None and lib["tracks"]:
+        lib["oldest"] = min(t["date"] for t in lib["tracks"] if t.get("date")) if any(t.get("date") for t in lib["tracks"]) else None
+    return lib.get("oldest")
+
+
+def lib_reach(lib):
+    """How far back a channel's library reaches: (complete, id, date). Every audio message with an id above
+    `id` is in it (None: unknown, so a scan back starts from the newest); complete: the whole history is."""
+    if "complete" in lib:
+        f = lib.get("floor") or {}
+        return bool(lib["complete"]), f.get("id"), f.get("date")
+    # a library from before the reach was kept: all years = the whole history; else down to its oldest track
+    if lib.get("years") is None:
+        return True, None, None
+    ids = [t["id"] for t in lib["tracks"]]
+    return False, (min(ids) - 1 if ids else None), lib_oldest(lib)
+
+
+def reach_info(lib):
+    """What the lists say of a channel's reach: the depth it is set to (years, 0 = all), the date of its oldest
+    track, and whether the whole history is in."""
+    if not lib:
+        return {"years": None, "oldest": None, "complete": False}
+    return {"years": lib.get("years") or 0, "oldest": lib_oldest(lib), "complete": lib_reach(lib)[0]}
+
+
+def reach_wanted(lib, years):
+    """Does the library need to go further back to cover `years` (None / 0: all)?"""
+    complete, _id, date = lib_reach(lib)
+    if complete:
+        return False
+    if not years:
+        return True
+    if not date:
+        return True
+    return datetime.fromisoformat(date) > years_cutoff(years)
+
+
+async def scan_messages(entity, job, min_id, offset_id, cutoff):
+    """The audio messages from the newest (or from `offset_id`, for a scan back) down to `min_id`, stopping at
+    `cutoff`. Returns (messages, stops): per kind of message, the one that went past the cutoff (or None)."""
+    seen, msgs, stops = set(), [], []
+    for flt in (InputMessagesFilterMusic, InputMessagesFilterDocument):
+        stop = None
+        async for m in client.iter_messages(entity, filter=flt, min_id=min_id, offset_id=offset_id):
+            if cutoff and m.date < cutoff:
+                stop = m
+                break
+            job["oldest"] = m.date.strftime("%Y-%m-%d")
+            if m.id not in seen and is_audio(m):
+                seen.add(m.id)
+                msgs.append(m)
+                job["found"] = len(msgs)
+        stops.append(stop)
+    return msgs, stops
+
+
+def new_reach(stops):
+    """The reach after a scan that stopped at `stops` (one per filter): the highest stop is where every filter
+    has been read down to; none stopped: the whole history."""
+    hit = [m for m in stops if m is not None]
+    if not hit:
+        return {"complete": True, "floor": None}
+    top = max(hit, key=lambda m: m.id)
+    return {"complete": False, "floor": {"id": top.id, "date": top.date.isoformat()}}
+
+
 async def scan_job(channel: int, full: bool):
     job = jobs[channel]
     try:
@@ -664,21 +740,11 @@ async def scan_job(channel: int, full: bool):
         prev = load_lib(channel)
         prev_read = {t["id"]: t for t in prev["tracks"] if t.get("tag_checked")} if prev else {}
         lib = None if full else prev
+        years = prev.get("years") if prev else (SCAN_YEARS or None)   # (a channel keeps its own depth, a full rescan too)
         min_id = lib["last_id"] if lib else 0   # incremental: only messages newer than the last scan
-        cutoff = None
-        if not lib and SCAN_YEARS:
-            cutoff = datetime.now(timezone.utc) - timedelta(days=365 * SCAN_YEARS)
+        cutoff = years_cutoff(years) if not lib else None
 
-        seen, msgs = set(), []
-        for flt in (InputMessagesFilterMusic, InputMessagesFilterDocument):
-            async for m in client.iter_messages(entity, filter=flt, min_id=min_id):
-                if cutoff and m.date < cutoff:
-                    break
-                job["oldest"] = m.date.strftime("%Y-%m-%d")
-                if m.id not in seen and is_audio(m):
-                    seen.add(m.id)
-                    msgs.append(m)
-                    job["found"] = len(msgs)
+        msgs, stops = await scan_messages(entity, job, min_id, 0, cutoff)
 
         old = lib["tracks"] if lib else []
         known = {t["id"] for t in old}
@@ -696,13 +762,22 @@ async def scan_job(channel: int, full: bool):
             "title": title, "username": username,
             "last_id": max((t["id"] for t in tracks), default=0),
             "updated": now_iso(),
-            "years": lib.get("years") if lib else (SCAN_YEARS or None),
+            "years": years,
             "tracks": tracks,
         }
+        if lib:
+            for k in ("complete", "floor", "oldest"):
+                if k in lib:
+                    new_lib[k] = lib[k]
+        else:
+            new_lib.update(new_reach(stops))
+        new_lib["oldest"] = None
+        lib_oldest(new_lib)
         libs[channel] = new_lib
         save_lib(channel, new_lib)
         update_channel_info(channel, title, username)
         job["added"] = len(added)
+        await scan_back(channel, entity, new_lib, job)
         await backfill_meta(channel, entity, new_lib, job)
         await read_tags(channel, entity, new_lib, job)
         start_task(asyncio.to_thread(_manifest_bytes, "v2"))   # have the new list ready before it's asked for
@@ -713,7 +788,26 @@ async def scan_job(channel: int, full: bool):
             start_task(forget_session(e))
     finally:
         job["running"] = False
-        job["finished"] = now_iso()
+
+
+async def scan_back(channel, entity, lib, job):
+    """Reads older messages when the channel's wanted depth (lib["years"]) is further back than it reaches."""
+    years = lib.get("years")
+    if not reach_wanted(lib, years):
+        return
+    _complete, floor_id, _date = lib_reach(lib)
+    cutoff = years_cutoff(years)
+    job["phase"] = "list"
+    msgs, stops = await scan_messages(entity, job, 0, (floor_id + 1) if floor_id else 0, cutoff)
+    known = {t["id"] for t in lib["tracks"]}
+    added = [t for t in build_tracks(msgs) if t["id"] not in known]
+    lib["tracks"] = lib["tracks"] + added
+    lib.update(new_reach(stops))
+    lib["oldest"] = None
+    lib_oldest(lib)
+    lib["updated"] = now_iso()
+    job["added"] = job.get("added", 0) + len(added)
+    save_lib(channel, lib)
 
 
 async def run_scan(channel, full=False):
@@ -1044,7 +1138,7 @@ async def channels():
         out.append({"id": d.id, "title": d.title, "username": getattr(d.entity, "username", None),
                     "selected": d.id in sel,
                     "tracks": len(lib["tracks"]) if lib else 0,
-                    "updated": lib.get("updated") if lib else None})
+                    "updated": lib.get("updated") if lib else None, **reach_info(lib)})
     out.sort(key=lambda c: (not c["selected"], c["title"].lower()))
     return out
 
@@ -1073,7 +1167,7 @@ async def jobs_status():
     for ch in selected():
         lib = load_lib(ch)
         out[str(ch)] = {"job": jobs.get(ch), "tracks": len(lib["tracks"]) if lib else 0,
-                        "updated": lib.get("updated") if lib else None,
+                        "updated": lib.get("updated") if lib else None, **reach_info(lib),
                         "title": (lib or {}).get("title") or selected()[ch].get("title") or str(ch)}
     return {"sched": sched, "channels": out}
 
@@ -1115,7 +1209,7 @@ async def stats():
         out.append({"id": ch, "title": (lib or {}).get("title") or info.get("title") or str(ch),
                     "tracks": len(tracks), "listed": listed, "read": read, "waiting": len(tracks) - read,
                     "complete": complete, "missing": dict(missing),
-                    "updated": (lib or {}).get("updated"), "years": (lib or {}).get("years"), "job": job})
+                    "updated": (lib or {}).get("updated"), **reach_info(lib), "job": job})
     out.sort(key=lambda c: c["title"].lower())
     return {"authorized": authorized, "me": me_name.get("v"), "signedOut": None if authorized else signed_out.get("reason"),
             "refreshMinutes": REFRESH_MINUTES,
@@ -1128,6 +1222,59 @@ async def refresh_all_now():
         return {"started": False}
     start_task(refresh_all())
     return {"started": True}
+
+
+async def scan_after(channels):
+    """Scans the channels one after the other, each when it is free (a scan already running is not interrupted)."""
+    for ch in channels:
+        for _ in range(1800):
+            if not jobs.get(ch, {}).get("running"):
+                break
+            await asyncio.sleep(2)
+        try:
+            await run_scan(ch)
+        except Exception as e:
+            print(f"[scan {ch}] {e!r}", flush=True)
+
+
+def set_years(ch, years):
+    """A channel's depth. Deeper than its reach: True (a scan back is due); shallower: nothing is removed."""
+    lib = load_lib(ch)
+    if not lib:
+        return False
+    years = int(years) or None
+    lib["years"] = years
+    write_json(lib_path(ch), lib)
+    return reach_wanted(lib, years)
+
+
+class Years(BaseModel):
+    years: int = Field(ge=0, le=50)
+
+
+@app.post("/api/years/{channel}")
+async def channel_years(channel: int, b: Years):
+    """How many years back one channel is read (0 = all). Going deeper starts the scan back."""
+    if channel not in selected():
+        raise HTTPException(404, "that channel isn't in the library")
+    if not load_lib(channel):
+        raise HTTPException(409, "that channel hasn't been read yet")
+    due = set_years(channel, b.years)
+    if due:
+        start_task(scan_after([channel]))
+    return {"ok": True, "scanning": due}
+
+
+@app.post("/api/years")
+async def default_years(b: Years):
+    """The default depth: for channels added from now on, and every channel in the library is set to it
+    (those that reach less far start reading back, one after the other)."""
+    global SCAN_YEARS
+    SCAN_YEARS = b.years
+    due = [ch for ch in selected() if set_years(ch, b.years)]
+    if due:
+        start_task(scan_after(due))
+    return {"ok": True, "scanning": len(due)}
 
 
 @app.post("/api/scan/{channel}")

@@ -263,7 +263,7 @@ ANALYSIS_RESCAN_MS: 1800000       # how often the music folder is looked through
 TG_API_ID: ''                     # a Telegram app ID (normally entered in Uzikext: ⋮ → Library → Telegram → App ID)
 TG_API_HASH: ''
 REFRESH_MINUTES: 60               # the bridge: how often the ticked channels are checked (⋮ → Library → Telegram → Sync)
-SCAN_YEARS: 3                     # the bridge: how far back a newly ticked channel is scanned; 0 = all (same place)
+SCAN_YEARS: 3                     # the bridge: how far back channels are scanned (the default scan: Uzikext → Telegram); 0 = all (same place)
 TAG_CONCURRENCY: 3                # the bridge: how many files are tagged at once (same place)
 WHILE_PLAYING: slow               # the bridge: while a track plays, the sync slows down, or "pause" (same place)
 STREAM_AHEAD: 3                   # the bridge: pieces of 512 KB fetched at once for a track (fast, not greedy)
@@ -291,6 +291,15 @@ TOMBSTONE_TTL_MS: 7776000000
 make the package public once (GitHub → Packages → uzikext-server → settings), and put your GitHub name in
 `docker-compose.yml`'s `image:`. A GitHub release for a newer `server-v…` tag is what the servers see as
 "update available".
+
+## How far back a channel is read
+
+Each channel has its own depth (1, 3, 5, 10 years or All), shown in the channel's page in Uzikext (Settings → Library →
+Telegram → the channel: *Read back to* the date of its oldest track, and *Scan back*). Going further back starts reading
+the older posts at once; a shorter depth removes nothing. *Default scan* (Settings → Library → Telegram) is the depth of
+channels added from now on, and changing it sets every channel to it. `POST /api/years/{channel}` and `POST /api/years`
+(`{years}`, 0 = all) do the same on the bridge; `/api/channels`, `/api/jobs` and `/api/stats` give each channel's
+`years`, `oldest` and `complete`.
 
 ## Controller presets
 

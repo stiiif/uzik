@@ -291,3 +291,8 @@ TOMBSTONE_TTL_MS: 7776000000
 make the package public once (GitHub → Packages → uzikext-server → settings), and put your GitHub name in
 `docker-compose.yml`'s `image:`. A GitHub release for a newer `server-v…` tag is what the servers see as
 "update available".
+
+## Controller presets
+
+`GET /controller-presets` (the list), `POST /controller-presets {preset}` (save; the same name replaces), `POST /controller-presets/get {id}`, `POST /controller-presets/delete {id}`.
+Uzikext → Controllers saves and loads its mapping presets here (at most 200, 512 KB each), in the server's info table; they never leave the server except to a paired device.

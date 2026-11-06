@@ -34,6 +34,7 @@
 //   POST /energy/delete   {paths:[...]}         tombstones
 //   GET  /events?token=T                        SSE: "data: {maxSeq}" on every write + heartbeat
 //   GET  /presence / POST /presence             in-memory heartbeat, advisory only
+//   GET  /controller-presets · POST {preset} · POST /get {id} · POST /delete {id}   Controllers' saved presets
 //   GET  /backups                               the backups (Uzikext archives, see backups.js / archive.js)
 //   POST /backups/now     {scope:'data'|'full'} make one now
 //   GET  /backups/file?name=N                   download one
@@ -61,7 +62,7 @@ const { startBridge, bundledBridge } = require('./telegram-runner.js');
 const { startUpdateCheck } = require('./update-check.js');
 const { statusPage } = require('./status-page.js');
 const SERVER_VERSION = 4;            // the protocol, what Uzikext checks
-const SERVER_RELEASE = '4.2.3';      // this release (the update check compares it)
+const SERVER_RELEASE = '4.2.4';      // this release (the update check compares it)
 
 const PORT = Number(process.env.PORT) || 8787;
 // Inside the Uzikext app (SERVER_MODE=app): the app starts this server, listening on this computer only
@@ -435,6 +436,40 @@ applyTelegram();
 settings.onChange(() => applyTelegram());
 const tgState = () => { const t = settings.effective().telegram; return { ...tg.state(), mode: tgMode, needsAppId: tgMode === 'needs-app-id', appId: t.apiId || null, appIdFrom: t.from, runner: bridgeRunner ? bridgeRunner.state() : null }; };
 const updates = startUpdateCheck({ repo: process.env.UPDATE_REPO || '', current: SERVER_RELEASE, log: msg => console.log(`[update] ${msg}`) });
+// ---------- controller presets: kept in the info table, as one list ----------
+const ctlPresets = (() => {
+  const KEY = 'controller_presets', MAX_PRESETS = 200, MAX_ONE = 512 * 1024;
+  const read = () => { try { const a = JSON.parse(getInfo(KEY) || '[]'); return Array.isArray(a) ? a : []; } catch (e) { return []; } };
+  const write = a => setInfo(KEY, JSON.stringify(a));
+  const isObj = v => v && typeof v === 'object' && !Array.isArray(v);
+  const legacyN = s => s.legacy ? Object.keys(s.legacy.shortcuts || {}).length + Object.keys(s.legacy.vibeKeys || {}).length : 0;
+  function clean(x) {
+    if (!isObj(x)) throw new Error('no preset');
+    const name = String(x.name || '').trim().slice(0, 80);
+    if (!name) throw new Error('a preset needs a name');
+    if (!Array.isArray(x.sources) || !x.sources.length || x.sources.length > 64) throw new Error('a preset needs its sources');
+    const sources = x.sources.map(s => {
+      if (!isObj(s) || !Array.isArray(s.mappings) || s.mappings.length > 4000 || !s.mappings.every(isObj)) throw new Error('bad source in the preset');
+      return { model: String(s.model || '').slice(0, 120), name: String(s.name || '').slice(0, 120), kbd: !!s.kbd, mappings: s.mappings, ...(isObj(s.legacy) ? { legacy: s.legacy } : {}) };
+    });
+    const out = { v: 1, id: String(x.id || '').replace(/[^\w-]/g, '').slice(0, 40) || crypto.randomBytes(6).toString('hex'), name, kind: x.kind === 'source' ? 'source' : 'all', savedAt: Date.now(), sources };
+    if (JSON.stringify(out).length > MAX_ONE) throw new Error('that preset is too big');
+    return out;
+  }
+  return {
+    list: () => read().map(({ id, name, kind, savedAt, sources }) => ({ id, name, kind, savedAt, count: sources.reduce((n, s) => n + s.mappings.length + legacyN(s), 0), sources: sources.map(s => ({ model: s.model, name: s.name, kbd: s.kbd, count: s.mappings.length + legacyN(s) })) })),
+    get: id => read().find(p => p.id === id) || null,
+    save(x) {
+      const p = clean(x), all = read();
+      // (the same name and kind replaces the older one)
+      const i = all.findIndex(o => o.name.toLowerCase() === p.name.toLowerCase() && o.kind === p.kind && JSON.stringify(o.sources.map(s => s.model + '|' + s.kbd)) === JSON.stringify(p.sources.map(s => s.model + '|' + s.kbd)));
+      if (i >= 0) { p.id = all[i].id; all[i] = p; } else { if (all.length >= MAX_PRESETS) throw new Error('too many presets: remove one'); all.push(p); }
+      write(all);
+      return { id: p.id, name: p.name, savedAt: p.savedAt };
+    },
+    remove(id) { write(read().filter(p => p.id !== id)); }
+  };
+})();
 const identity = () => ({ id: SERVER_ID, name: settings.effective().name, version: SERVER_VERSION, release: SERVER_RELEASE });
 if (process.env.MDNS !== 'off') startDiscovery({ port: PORT, getIdentity: identity, log: msg => console.log(`[discovery] ${msg}`) });
 
@@ -691,6 +726,21 @@ const server = http.createServer((req, res) => {
 
   // ----- Telegram -----
   if (p.startsWith('/tg/')) return tg.forward(req, res, p.slice(3) + url.search, res.cors);
+
+  // ----- controller presets (Uzikext → Controllers: a saved set of mappings, for all controllers or one) -----
+  if (p === '/controller-presets' && req.method === 'GET') return send(res, 200, { presets: ctlPresets.list() });
+  if (p === '/controller-presets' && req.method === 'POST') {
+    return readJson(req, res, body => {
+      try { return send(res, 200, { ok: true, preset: ctlPresets.save(body.preset), presets: ctlPresets.list() }); }
+      catch (e) { return send(res, 400, { error: e.message }); }
+    });
+  }
+  if (p === '/controller-presets/get' && req.method === 'POST') {
+    return readJson(req, res, body => { const x = ctlPresets.get(String(body.id || '')); return x ? send(res, 200, { preset: x }) : send(res, 404, { error: 'no such preset' }); });
+  }
+  if (p === '/controller-presets/delete' && req.method === 'POST') {
+    return readJson(req, res, body => { ctlPresets.remove(String(body.id || '')); send(res, 200, { ok: true, presets: ctlPresets.list() }); });
+  }
 
   // ----- sync -----
   if (p === '/changes' && req.method === 'GET') {

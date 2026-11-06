@@ -16,8 +16,9 @@ WORKDIR /app
 COPY *.js ./
 COPY telegram-bridge/app.py telegram-bridge/requirements.txt ./telegram-bridge/
 COPY telegram-bridge/static ./telegram-bridge/static
-# energy-analysis-core.js above: the analysis algorithm, the same file as Uzikext's own (ui/), copied here when
-# it changes, so the server analyses exactly as the app and the extension do.
+# energy-analysis-core.js above is a BUILD-TIME FALLBACK only — the actual DSP algorithm, baked in so the
+# image works out of the box. A bind-mounted copy from the uzikext repo (docker-compose.yml) overrides it at
+# container start, so an algorithm edit in uzikext takes effect on a restart — no rebuild.
 # UPDATE_REPO: the GitHub repository this image is built from (owner/name): the server looks at its releases
 # once a day and says when a newer one exists (Uzikext's ⋮ → Sync, status page). Set by the build workflow.
 ARG UPDATE_REPO=""

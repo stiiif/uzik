@@ -662,6 +662,9 @@ def years_cutoff(years):
     return datetime.now(timezone.utc) - timedelta(days=365 * years) if years else None
 
 
+REACH_V = 2   # a library's reach counts only when a scan of this kind wrote it (older marks were guesses)
+
+
 def lib_oldest(lib):
     """The date of the oldest track of a channel (kept in the library, so the lists stay cheap)."""
     if not lib:
@@ -674,12 +677,12 @@ def lib_oldest(lib):
 def lib_reach(lib):
     """How far back a channel's library reaches: (complete, id, date). Every audio message with an id above
     `id` is in it (None: unknown, so a scan back starts from the newest); complete: the whole history is."""
-    if "complete" in lib:
+    if lib.get("reach_v") == REACH_V:
         f = lib.get("floor") or {}
         return bool(lib["complete"]), f.get("id"), f.get("date")
-    # a library from before the reach was kept: all years = the whole history; else down to its oldest track
-    if lib.get("years") is None:
-        return True, None, None
+    # a library from before the reach was kept: down to its oldest track, whatever depth it says (the depth alone
+    # can't be trusted: "all" was also written by a version that changed it without reading anything). The next
+    # scan reads what is older, finds the start of the channel if it is there, and writes the reach down.
     ids = [t["id"] for t in lib["tracks"]]
     return False, (min(ids) - 1 if ids else None), lib_oldest(lib)
 
@@ -687,10 +690,11 @@ def lib_reach(lib):
 def keep_reach(lib):
     """A library from before the reach was kept: write it down now (it was worked out from the depth it was read to,
     which is about to change)."""
-    if "complete" not in lib:
+    if lib.get("reach_v") != REACH_V:
         complete, floor_id, floor_date = lib_reach(lib)
         lib["complete"] = complete
         lib["floor"] = None if complete else {"id": floor_id, "date": floor_date}
+        lib["reach_v"] = REACH_V
 
 
 def reach_info(lib):
@@ -737,9 +741,9 @@ def new_reach(stops):
     has been read down to; none stopped: the whole history."""
     hit = [m for m in stops if m is not None]
     if not hit:
-        return {"complete": True, "floor": None}
+        return {"complete": True, "floor": None, "reach_v": REACH_V}
     top = max(hit, key=lambda m: m.id)
-    return {"complete": False, "floor": {"id": top.id, "date": top.date.isoformat()}}
+    return {"complete": False, "floor": {"id": top.id, "date": top.date.isoformat()}, "reach_v": REACH_V}
 
 
 async def scan_job(channel: int, full: bool):
@@ -775,7 +779,7 @@ async def scan_job(channel: int, full: bool):
             "tracks": tracks,
         }
         if lib:
-            for k in ("complete", "floor", "oldest"):
+            for k in ("complete", "floor", "oldest", "reach_v"):
                 if k in lib:
                     new_lib[k] = lib[k]
         else:

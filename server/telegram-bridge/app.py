@@ -684,6 +684,15 @@ def lib_reach(lib):
     return False, (min(ids) - 1 if ids else None), lib_oldest(lib)
 
 
+def keep_reach(lib):
+    """A library from before the reach was kept: write it down now (it was worked out from the depth it was read to,
+    which is about to change)."""
+    if "complete" not in lib:
+        complete, floor_id, floor_date = lib_reach(lib)
+        lib["complete"] = complete
+        lib["floor"] = None if complete else {"id": floor_id, "date": floor_date}
+
+
 def reach_info(lib):
     """What the lists say of a channel's reach: the depth it is set to (years, 0 = all), the date of its oldest
     track, and whether the whole history is in."""
@@ -798,6 +807,8 @@ async def scan_back(channel, entity, lib, job):
     _complete, floor_id, _date = lib_reach(lib)
     cutoff = years_cutoff(years)
     job["phase"] = "list"
+    job["back"] = True
+    job["found"] = 0
     msgs, stops = await scan_messages(entity, job, 0, (floor_id + 1) if floor_id else 0, cutoff)
     known = {t["id"] for t in lib["tracks"]}
     added = [t for t in build_tracks(msgs) if t["id"] not in known]
@@ -1169,7 +1180,7 @@ async def jobs_status():
         out[str(ch)] = {"job": jobs.get(ch), "tracks": len(lib["tracks"]) if lib else 0,
                         "updated": lib.get("updated") if lib else None, **reach_info(lib),
                         "title": (lib or {}).get("title") or selected()[ch].get("title") or str(ch)}
-    return {"sched": sched, "channels": out}
+    return {"sched": sched, "channels": out, "waiting": len(scan_waiting)}
 
 
 me_name = {}
@@ -1224,17 +1235,26 @@ async def refresh_all_now():
     return {"started": True}
 
 
+scan_waiting = []   # the channels queued for a scan (shown in the status: "3 more waiting")
+
+
 async def scan_after(channels):
     """Scans the channels one after the other, each when it is free (a scan already running is not interrupted)."""
+    scan_waiting.extend(c for c in channels if c not in scan_waiting)
     for ch in channels:
         for _ in range(1800):
             if not jobs.get(ch, {}).get("running"):
                 break
             await asyncio.sleep(2)
+        if ch in scan_waiting:
+            scan_waiting.remove(ch)
         try:
             await run_scan(ch)
         except Exception as e:
             print(f"[scan {ch}] {e!r}", flush=True)
+    for ch in channels:
+        if ch in scan_waiting:
+            scan_waiting.remove(ch)
 
 
 def set_years(ch, years):
@@ -1243,6 +1263,7 @@ def set_years(ch, years):
     if not lib:
         return False
     years = int(years) or None
+    keep_reach(lib)   # (what it reaches is worked out from the old depth, before the new one is set)
     lib["years"] = years
     write_json(lib_path(ch), lib)
     return reach_wanted(lib, years)

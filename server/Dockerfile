@@ -14,6 +14,9 @@ RUN apk add --no-cache --virtual .build gcc musl-dev python3-dev libffi-dev carg
  && apk del .build && rm -rf /tmp/tg-requirements.txt /root/.cargo
 WORKDIR /app
 COPY *.js ./
+# The build stops here, with the names, if a file the server needs didn't reach the repository (a file left out of a
+# commit, or ignored by git): better than a container that starts and dies with "Cannot find module".
+RUN node -e "const fs=require('fs');const bad=[];for(const f of fs.readdirSync('.').filter(x=>x.endsWith('.js')))for(const m of fs.readFileSync(f,'utf8').matchAll(/require\\(['\"]\\.\\/([^'\"]+)['\"]\\)/g))if(!fs.existsSync(m[1])&&!fs.existsSync(m[1]+'.js'))bad.push(f+' needs '+m[1]);if(bad.length){console.error('MISSING FILES IN THE REPOSITORY: '+bad.join(', '));process.exit(1)}"
 COPY telegram-bridge/app.py telegram-bridge/requirements.txt ./telegram-bridge/
 COPY telegram-bridge/static ./telegram-bridge/static
 # energy-analysis-core.js above is a BUILD-TIME FALLBACK only — the actual DSP algorithm, baked in so the

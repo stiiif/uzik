@@ -1,5 +1,21 @@
 # Uzikext server v4
 
+**v4.3: the beat grids.**
+
+- **Worked out on the server, in the background**, for the tracks of its music folders (not Telegram or URL
+  tracks): each track's tempo, beat grid and 1, with a verdict ("to check", and why). The same analysis as
+  Uzikext 13 Nov and later, by the same files (`grid-analysis-core.js`, and `waveview.js` for the waveform data
+  it is read from), run by `grid-dsp.js` on the analysis worker. Your computer can be off.
+- **Tracks analysed before** get their grid alone, after the new tracks: a decoding each, no analysis again.
+  The server's page says how many are left.
+- **Kept, synced and backed up** as their own record (kind `grids`), apart from the track's details, so a grid
+  never meets an edit of yours (a genre, a cue, a grid corrected by hand). A computer that plays a track first
+  works its grid out itself and sends it; the server then has nothing to do for that track.
+- The waveform data itself stays on each computer.
+- Needs Uzikext 13 Nov or later; an older Uzikext ignores the grids. Keep `grid-analysis-core.js` and
+  `waveview.js` the same as Uzikext's `ui/` copies (the app's installer copies them itself).
+
+
 **v4 (phase 1 of the easy setup):**
 
 - **Pairing instead of a token.** Each device pairs with a 6-digit code and gets a key of its own; devices are

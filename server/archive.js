@@ -21,7 +21,7 @@ const { createZip, readZip } = require('./zip.js');
 
 const FORMAT = 'uzikext-archive';
 const VERSION = 1;
-const CORE_KINDS = ['tags', 'notes', 'played', 'excluded', 'vibes', 'meta', 'settings', 'bans'];
+const CORE_KINDS = ['tags', 'notes', 'played', 'excluded', 'vibes', 'meta', 'settings', 'bans', 'grids'];
 const ENERGY_COLS = 'path, ts, intensity, bpm, bpm_source, melodic_score, melodic_harmonicity, melodic_movement, sub_hz, sub_quality, explosiveness_metrics, duration_sec, skip_reason, blob';
 
 const README = (m) => `Uzikext archive
@@ -31,7 +31,8 @@ Scope: ${m.scope === 'full' ? 'your data and the analysis of every track' : 'you
 
 data/<kind>.jsonl        your data, one record per line ({key, ts, removed, payload}):
                          tags = stars, notes, played, vibes, excluded, bans,
-                         meta = track metadata and your edits, settings = shared settings
+                         meta = track metadata and your edits, settings = shared settings,
+                         grids = each track's beat grid as the analysis found it
 analysis/energy.jsonl    each track's analysis (intensity, BPM, melody, sub-bass, explosiveness),
 analysis/energy.bin      and its analysed waveform (binary, see energy-codec.js)
 device/                  (device exports only) that device's own settings and stores

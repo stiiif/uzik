@@ -10,6 +10,7 @@
 const { scanMusicDir } = require('./library-scan.js');
 const { decodeAudioFile } = require('./audio-decode.js');
 const Codec = require('./energy-codec.js');
+const { gridRecord, TOO_LONG, GRID_V } = require('./grid-dsp.js');
 const { Worker } = require('worker_threads');
 const path = require('path');
 
@@ -69,7 +70,7 @@ function makeAnalysisWorkerRunner(log) {
   // itself, which — unlike decodeAudioFile's ffmpeg call — had no timeout at all before this: a genuine
   // hang here would leave that lane busy forever, with no failure logged and no way to tell it apart from
   // just being slow).
-  function run(samples, samplesR, sampleRate, settings, needFull, existingBpm, { timeoutMs = 20 * 60 * 1000, onProgress } = {}) {
+  function run(samples, samplesR, sampleRate, settings, needFull, existingBpm, { timeoutMs = 20 * 60 * 1000, onProgress, needExplosiveness = true, needGrid = false } = {}) {
     return new Promise((resolve, reject) => {
       const w = ensureWorker();
       let settled = false;
@@ -105,14 +106,14 @@ function makeAnalysisWorkerRunner(log) {
       w.postMessage({
         samples: samples.buffer, samplesR: samplesR ? samplesR.buffer : null, sampleRate,
         trebleCutoffHz: settings.trebleCutoffHz, melodyLoHz: settings.melodyBandLoHz, melodyHiHz: settings.melodyBandHiHz,
-        needFull, needExplosiveness: true, existingBpm,
+        needFull, needExplosiveness, existingBpm, needGrid,
       }, transferList);
     });
   }
   return { run, terminate: () => { if (worker) { worker.terminate(); worker = null; } } };
 }
 
-function startAnalysisScheduler({ db, energyUpsertStmt, energyGetStmt, energyMarkSkippedStmt, nextSeq, musicDir, rootName, roots, heldBy, paceMs, rescanMs, concurrency = 1, maxDurationSec = 0, log, broadcast }) {
+function startAnalysisScheduler({ db, energyUpsertStmt, energyGetStmt, energyMarkSkippedStmt, coreGetStmt, coreUpsertStmt, nextSeq, musicDir, rootName, roots, heldBy, paceMs, rescanMs, concurrency = 1, maxDurationSec = 0, log, broadcast }) {
   // One persistent worker per lane, each able to have one track in flight at a time — concurrency > 1
   // means that many tracks genuinely analyze simultaneously, not just queued back-to-back. Safe to do
   // now specifically because each lane's DSP work runs on its OWN worker thread (see
@@ -129,6 +130,12 @@ function startAnalysisScheduler({ db, energyUpsertStmt, energyGetStmt, energyMar
   // exactly what analyzeEnergy() does client-side, for the same reason: the goal from the start was "add
   // this one new metric without re-analyzing everything that's already correct".
   const stmtExistingPaths = db.prepare('SELECT path, explosiveness_metrics, bpm, skip_reason FROM energy WHERE deleted=0');
+  // The grid analysis (grid-dsp.js) has its own record per track (core kind 'grids', synced like a star or a
+  // note), kept apart from the track's details so that it never meets an edit made on a device: a track whose
+  // record is of an older method (its `a`), or has none, gets one. Whoever works it out first (this server,
+  // or a computer that played the track) writes it; the other then has nothing to do.
+  const stmtGridRows = db.prepare("SELECT key, payload FROM core WHERE kind='grids' AND removed=0");
+  const gridIsCurrent = payload => { try { const g = JSON.parse(payload); return !!g && g.a === GRID_V; } catch (e) { return false; } };
   // currentPaths[i] is the path lane i is analyzing right now, or null if that lane is idle — one slot
   // per lane, indexed the same way workerRunners/laneBusy are, so /health can show exactly what's in
   // flight at concurrency > 1, not just an aggregate count.
@@ -148,15 +155,22 @@ function startAnalysisScheduler({ db, energyUpsertStmt, energyGetStmt, energyMar
     catch (e) { log(`Library scan failed: ${e.message}`); return; }
     if (stopped) return;
     const existingRows = new Map(stmtExistingPaths.all().map(r => [r.path, r]));
+    const gridDone = new Set(stmtGridRows.all().filter(r => gridIsCurrent(r.payload)).map(r => r.key));
     queue = [];
+    const gridOnly = [];
     let alreadySkipped = 0;
     for (const f of found) {
-      const row = existingRows.get(f.path);
+      const row = existingRows.get(f.path), needGrid = !gridDone.has(f.path);
       if (row && row.skip_reason) { alreadySkipped++; continue; } // a permanent decision from a previous scan — don't re-decode just to re-check
-      if (!row) queue.push({ ...f, needFull: true, existingBpm: undefined }); // genuinely new
-      else if (row.explosiveness_metrics == null) queue.push({ ...f, needFull: false, existingBpm: row.bpm }); // backfill only
+      if (!row) queue.push({ ...f, needFull: true, needExplosiveness: true, needGrid, existingBpm: undefined }); // genuinely new
+      else if (row.explosiveness_metrics == null) queue.push({ ...f, needFull: false, needExplosiveness: true, needGrid, existingBpm: row.bpm }); // backfill only
+      // (analysed already, but without a grid of the current method: the grid alone, after the rest)
+      else if (needGrid) gridOnly.push({ ...f, needFull: false, needExplosiveness: false, needGrid: true, existingBpm: row.bpm });
       // else: already fully analyzed, nothing to do
     }
+    queue.push(...gridOnly);
+    stats.gridsKnown = gridDone.size;
+    stats.gridsQueued = queue.filter(q => q.needGrid).length;
     stats.totalKnown = found.length;
     stats.queueLength = queue.length;
     // Unlike stats.analyzed/failed (pure session-scoped event counters, never reset), skipped is closer in
@@ -168,9 +182,21 @@ function startAnalysisScheduler({ db, energyUpsertStmt, energyGetStmt, energyMar
     stats.skipped = alreadySkipped;
     stats.lastScanAt = Date.now();
     stats.samplePaths = found.slice(0, 3).map(f => f.path);
-    const backfillCount = queue.filter(q => !q.needFull).length;
-    log(`Library scan: ${found.length} tracks found under ${rootList.map(r => `"${r.name}"`).join(", ")}, ${queue.length} need analysis (${queue.length - backfillCount} new, ${backfillCount} backfill-only), ${alreadySkipped} previously skipped as too long`);
+    const backfillCount = queue.filter(q => !q.needFull && q.needExplosiveness).length;
+    log(`Library scan: ${found.length} tracks found under ${rootList.map(r => `"${r.name}"`).join(", ")}, ${queue.length} need analysis (${queue.filter(q => q.needFull).length} new, ${backfillCount} backfill-only, ${gridOnly.length} the beat grid only), ${alreadySkipped} previously skipped as too long`);
     if (found.length) log(`Sample path this scan generated: "${found[0].path}" — compare this EXACTLY (case, punctuation, everything) against the File Path column for the same track in the extension. A mismatch anywhere means results are being written under a path the client will never match.`);
+  }
+
+  function gridHasCurrent(p) { const cur = coreGetStmt.get('grids', p); return !!cur && !cur.removed && gridIsCurrent(cur.payload); }
+  // the grid's record, unless one of the current method got there first (from a computer, while this one ran)
+  function writeGrid(p, g, ts, err) {
+    if (err) log(`Beat grid failed for ${p}: ${err}`);
+    if (gridHasCurrent(p)) return;
+    const cur = coreGetStmt.get('grids', p);
+    const at = cur && cur.ts >= ts ? cur.ts + 1 : ts;   // (newer than what is there, whatever the clocks say)
+    coreUpsertStmt.run('grids', p, at, 0, JSON.stringify(gridRecord(p, g, at)), nextSeq());
+    stats.grids = (stats.grids || 0) + 1;
+    if (broadcast) broadcast('core');
   }
 
   async function processLane(laneIdx) {
@@ -180,12 +206,19 @@ function startAnalysisScheduler({ db, energyUpsertStmt, energyGetStmt, energyMar
     stats.running = stats.activeLanes > 0;
     const item = queue.shift();
     stats.queueLength = queue.length;
+    if (item.needGrid && stats.gridsQueued) stats.gridsQueued--;
     stats.currentPaths[laneIdx] = item.path;
     stats.currentProgress[laneIdx] = 0;
     try {
       const settings = readAnalysisSettings(db); // re-read each track so a live settings change takes effect without a restart
       const { left, right, sampleRate } = await decodeAudioFile(item.absPath);
       const durationSec = left.length / sampleRate;
+      // (analysed already, only its grid to do: over the length limit, its grid's record says so, and the
+      // analysis already there is left as it is)
+      if (maxDurationSec > 0 && durationSec > maxDurationSec && !item.needFull && !item.needExplosiveness) {
+        if (item.needGrid) writeGrid(item.path, TOO_LONG, Date.now());
+        return;
+      }
       if (maxDurationSec > 0 && durationSec > maxDurationSec) {
         // Skip the expensive part (the DSP analysis, not the decode — duration isn't knowable without at
         // least decoding, and decode itself is comparatively cheap) and record this as a PERMANENT
@@ -199,10 +232,15 @@ function startAnalysisScheduler({ db, energyUpsertStmt, energyGetStmt, energyMar
         return;
       }
       if (stopped) return;
+      // (a computer may have worked the grid out since the scan: then not again)
+      const needGrid = item.needGrid && !gridHasCurrent(item.path);
+      if (!item.needFull && !item.needExplosiveness && !needGrid) return;
       const result = await workerRunners[laneIdx].run(left, right, sampleRate, settings, item.needFull, item.existingBpm,
-        { onProgress: (pct) => { stats.currentProgress[laneIdx] = pct; } });
+        { onProgress: (pct) => { stats.currentProgress[laneIdx] = pct; }, needExplosiveness: item.needExplosiveness, needGrid });
       if (stopped) return;   // (settings changed while this one ran: a new scheduler takes over)
       const ts = Date.now();
+      if (needGrid) writeGrid(item.path, result.grid, ts, result.gridError);
+      if (!item.needFull && !item.needExplosiveness) { stats.analyzed++; return; }
 
       const explosivenessMetricsJson = result.explosivenessMetrics ? JSON.stringify(result.explosivenessMetrics) : null;
       if (item.needFull) {

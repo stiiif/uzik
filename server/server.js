@@ -62,7 +62,7 @@ const { startBridge, bundledBridge } = require('./telegram-runner.js');
 const { startUpdateCheck } = require('./update-check.js');
 const { statusPage } = require('./status-page.js');
 const SERVER_VERSION = 4;            // the protocol, what Uzikext checks
-const SERVER_RELEASE = '4.2.8';      // this release (the update check compares it)
+const SERVER_RELEASE = '4.3.0';      // this release (the update check compares it)
 
 const PORT = Number(process.env.PORT) || 8787;
 // Inside the Uzikext app (SERVER_MODE=app): the app starts this server, listening on this computer only
@@ -116,7 +116,8 @@ const ANALYSIS_MAX_DURATION_SEC = Number(process.env.ANALYSIS_MAX_DURATION_SEC) 
   // at all) rather than let the automatic backlog spend disproportionate time on them. 0 disables the
   // limit entirely (nothing is ever too long).
 const CHANGES_LIMIT_MAX = 5000;
-const CORE_KINDS = new Set(['tags', 'notes', 'played', 'excluded', 'vibes', 'meta', 'settings', 'bans']);
+// (grids: each track's beat grid as the grid analysis found it, worked out here or on a computer: grid-dsp.js)
+const CORE_KINDS = new Set(['tags', 'notes', 'played', 'excluded', 'vibes', 'meta', 'settings', 'bans', 'grids']);
 
 const guard = createGuard({ allowFrom: process.env.ALLOW_FROM || 'home', corsOrigins: process.env.CORS_ORIGINS || '' });
 
@@ -243,6 +244,7 @@ for (const sig of ['SIGTERM', 'SIGINT']) process.on(sig, () => { saveEpochFiles(
 
 const stmts = {
   coreGet: db.prepare('SELECT ts, removed FROM core WHERE kind=? AND key=?'),
+  coreGetFull: db.prepare('SELECT ts, removed, payload FROM core WHERE kind=? AND key=?'),
   coreUpsert: db.prepare('INSERT INTO core (kind,key,ts,removed,payload,seq) VALUES (?,?,?,?,?,?) ON CONFLICT(kind,key) DO UPDATE SET ts=excluded.ts, removed=excluded.removed, payload=excluded.payload, seq=excluded.seq'),
   coreChanges: db.prepare('SELECT kind, key, ts, removed, payload, seq FROM core WHERE seq > ? ORDER BY seq LIMIT ?'),
   coreAll: db.prepare('SELECT kind, key, ts, removed, payload FROM core ORDER BY kind, key'),
@@ -547,7 +549,8 @@ function applyAnalysis() {
   if (analysisScheduler) { analysisScheduler.stop(); analysisScheduler = null; }
   if (!roots.length) return;
   analysisScheduler = startAnalysisScheduler({
-    db, energyUpsertStmt: stmts.energyUpsert, energyGetStmt: stmts.energyGet, energyMarkSkippedStmt: stmts.energyMarkSkipped, nextSeq,
+    db, energyUpsertStmt: stmts.energyUpsert, energyGetStmt: stmts.energyGet, energyMarkSkippedStmt: stmts.energyMarkSkipped,
+    coreGetStmt: stmts.coreGetFull, coreUpsertStmt: stmts.coreUpsert, nextSeq,
     roots, heldBy, paceMs: a.paceMs, rescanMs: a.rescanMs, concurrency: a.concurrency, maxDurationSec: a.maxDurationSec,
     log: msg => console.log(`[analysis] ${msg}`), broadcast,
   });
@@ -619,7 +622,7 @@ const server = http.createServer((req, res) => {
       name: settings.effective().name, release: SERVER_RELEASE, address: `http://${req.headers.host || 'this-server:' + PORT}`,
       devices: auth.deviceCount(), update: updates.state(), firstRun: firstRun(),
       music: m.roots.length ? m.roots.map(r => `${r.dir} as "${r.name}"`).join(', ') : (MUSIC_DIR ? `${MUSIC_DIR}: not matched with your devices' folders yet (add your music folder in Uzikext)` : 'none mounted (/music)'),
-      analysis: !a ? 'off (no music folder)' : `${a.enabled ? 'on' : 'paused'} · ${(a.totalKnown - a.queueLength).toLocaleString()} of ${a.totalKnown.toLocaleString()} tracks analysed`,
+      analysis: !a ? 'off (no music folder)' : `${a.enabled ? 'on' : 'paused'} · ${(a.totalKnown - a.queueLength).toLocaleString()} of ${a.totalKnown.toLocaleString()} tracks analysed${a.gridsQueued ? ` · ${a.gridsQueued.toLocaleString()} beat grids to do` : ''}`,
       telegram: t.needsAppId ? 'waiting for your Telegram app ID (Uzikext → ⋮ → Library → Telegram → App ID)' : !t.configured ? 'off' : t.reachable ? (t.authorized ? 'signed in' : 'bridge running, not signed in') : t.reachable === false ? `bridge not reachable${t.error ? ' (' + t.error + ')' : ''}` : '…'
     });
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'X-Frame-Options': 'DENY', 'Content-Security-Policy': "default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'" });

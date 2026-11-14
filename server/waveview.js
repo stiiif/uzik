@@ -456,6 +456,108 @@
     return out;
   }
 
+  // ---------- a grid of pins (stage 2) ----------
+  // A grid set by hand is a BPM and a list of pins. A pin says "beat b is at time t" (b counts beats; the bar lines
+  // are the beats whose b is a multiple of 4). With one pin the grid is the BPM laid from it, both ways: the usual
+  // case, a constant tempo. With several, the beats between two pins are spread evenly over the time between them
+  // (a tempo that wanders, a grid that jumps after a break), and before the first pin and after the last the grid
+  // runs at the BPM. A grid of pins never leans on the automatic grid, so nothing in it moves when the analysis
+  // changes. b may be fractional (a ÷2 leaves an odd beat at a half), the bar lines stay where b is whole and a
+  // multiple of 4.
+  // pinGrid(model) -> the grid object the views and the decks use: { bpm, period, t0, bar0 } as before (with one
+  // pin, exactly the constant grid, from bar 1; with several, the stretch at 0:00), plus pins, beatAt(t), timeAt(b) and
+  // at(t): the constant grid of the stretch t is in (what a loop, a jump or sync uses there).
+  function pinGrid(m) {
+    if (!m || !(m.bpm > 0) || !Array.isArray(m.pins) || !m.pins.length) return null;
+    const pins = m.pins.filter(p => p && isFinite(p.t) && isFinite(p.b)).slice().sort((x, y) => x.t - y.t);
+    // (pins out of order, or two on one beat, say nothing: kept only when their beats go up with their times)
+    const ps = [];
+    for (const p of pins) if (!ps.length || (p.t > ps[ps.length - 1].t + 1e-4 && p.b > ps[ps.length - 1].b + 1e-6)) ps.push({ t: p.t, b: p.b, ...(p.f ? { f: 1 } : {}) });
+    if (!ps.length) return null;
+    const P = 60 / m.bpm, last = ps.length - 1;
+    // the stretch t is in: -1 before the first pin, i between pin i and i + 1, last after the last
+    const segT = t => { if (t < ps[0].t) return -1; let i = 0; while (i < last && t >= ps[i + 1].t) i++; return i; };
+    const segB = b => { if (b < ps[0].b) return -1; let i = 0; while (i < last && b >= ps[i + 1].b) i++; return i; };
+    const per = i => (i < 0 || i >= last ? P : (ps[i + 1].t - ps[i].t) / (ps[i + 1].b - ps[i].b));
+    const from = i => ps[Math.max(0, i)];
+    const beatAt = t => { const i = segT(t), p = from(i); return p.b + (t - p.t) / per(i); };
+    const timeAt = b => { const i = segB(b), p = from(i); return p.t + (b - p.b) * per(i); };
+    const local = i => {
+      const p = from(i), period = per(i);
+      // (a bar line on this stretch's line: the one nearest its pin)
+      const bar0 = p.t + (4 * Math.round(p.b / 4) - p.b) * period;
+      return { bpm: 60 / period, period, t0: bar0, bar0 };
+    };
+    // (the grid as a whole: the stretch at 0:00, from bar 1, the first bar line of the track)
+    const i0 = segT(0), p0 = from(i0), P0 = per(i0), k1 = 4 * Math.ceil(beatAt(-0.02) / 4 - 1e-9), bar1 = p0.t + (k1 - p0.b) * P0;
+    const g = { bpm: m.bpm, period: P0, t0: bar1, bar0: bar1, pins: ps, beatAt, timeAt };
+    if (ps.length === 1) { g.bpm = m.bpm; g.at = () => g; return g; }
+    g.bend = true;
+    g.at = t => ({ ...local(segT(t)), pins: ps, beatAt, timeAt, bend: true });
+    return g;
+  }
+  // the same three for any grid, with pins or a plain constant one ({ period, bar0 })
+  function gridBeatAt(g, t) { return g.beatAt ? g.beatAt(t) : (t - g.bar0) / g.period; }
+  function gridTimeAt(g, b) { return g.timeAt ? g.timeAt(b) : g.bar0 + b * g.period; }
+  function gridLocal(g, t) { return g && g.at ? g.at(t) : g; }
+  // The largest distance (ms) between the beats of two grids over 0..dur, and whether their bars agree
+  function gridApart(a, b, dur) {
+    let worst = 0, bars = true;
+    const k0 = Math.ceil(gridBeatAt(a, 0)), k1 = Math.floor(gridBeatAt(a, dur));
+    for (let k = k0; k <= k1; k++) {
+      const ta = gridTimeAt(a, k), kb = Math.round(gridBeatAt(b, ta));
+      worst = Math.max(worst, Math.abs(gridTimeAt(b, kb) - ta));
+      if (((kb - k) % 4 + 4) % 4 !== 0) bars = false;
+    }
+    return { ms: worst * 1000, bars };
+  }
+  // A model as it is kept: its pins in order, rounded (a µs, a millionth of a beat), a lone pin that isn't yours
+  // on the bar line nearest it (the same grid), and what the builds before pins read: a warp at bpmSet (the same
+  // BPM) from `anchor` (the first pin's bar line), `fixed` when that pin is yours and on it. -> { v: 4, bpm, pins,
+  // anchor, fixed } (k, what was corrected, is the caller's)
+  function pinStore(m) {
+    let pins = m.pins.map(p => ({ t: p.t, b: p.b, ...(p.f ? { f: 1 } : {}) })).sort((x, y) => x.t - y.t);
+    if (pins.length === 1 && !pins[0].f) {
+      const g = pinGrid({ bpm: m.bpm, pins }), kb = 4 * Math.round(pins[0].b / 4);
+      pins = [{ t: g.timeAt(kb), b: 0 }];
+    }
+    pins = pins.map(p => ({ t: Math.round(p.t * 1e6) / 1e6, b: Math.round(p.b * 1e6) / 1e6, ...(p.f ? { f: 1 } : {}) }));
+    const out = { v: 4, bpm: m.bpm, pins };
+    const g = pins.length ? pinGrid(out) : null;
+    if (g) {
+      const a = g.timeAt(4 * Math.round(pins[0].b / 4));
+      out.anchor = Math.round(a * 1e6) / 1e6;
+      if (pins[0].f && Math.abs(a - pins[0].t) < 1e-4) out.fixed = true;
+    }
+    return out;
+  }
+  // The corrections of before pins (kept in the track's details by the builds before 13 Nov 2026, stage 2):
+  // e: { bar, ms, mul, v } relative to an automatic grid, or { anchor, fixed (, ms, bar) } a warp; typed: the BPM
+  // typed (bpmSet), or null.
+  // legacyApply(base, e, typed): the grid they gave, from the grid they were made on (base: the warp needs none,
+  // only typed; a BPM typed without a warp: the grid fitted near it, beatGrid at that BPM).
+  function legacyApply(base, e, typed) {
+    if (e && e.anchor != null) {
+      if (!(typed > 40 && typed < 250)) return null;
+      const period = 60 / typed, b0 = e.anchor + (e.ms || 0) / 1000 + (e.bar || 0) * period;
+      return { bpm: typed, period, t0: b0, bar0: b0, edited: true, warped: true };
+    }
+    if (!base) return null;
+    if (!e) return base;
+    const mul = e.mul || 1, period = base.period / mul, off = (e.ms || 0) / 1000;
+    return { bpm: base.bpm * mul, period, t0: base.t0 + off, bar0: base.bar0 + off + (e.bar || 0) * period, edited: true };
+  }
+  // legacyPins(e, typed, g, dur): that grid g as one pin and a BPM: a warp's own bar (pinned when it was fixed);
+  // else the bar line nearest the middle of the track. A BPM typed without a warp: that BPM exactly (it wasn't
+  // applied exactly before: the grid ran at the fitted tempo), so that grid differs from g away from the pin.
+  function legacyPins(e, typed, g, dur) {
+    if (e && e.anchor != null) return { bpm: g.bpm, pins: [{ t: e.anchor + (e.ms || 0) / 1000, b: -(e.bar || 0), ...(e.fixed ? { f: 1 } : {}) }] };
+    const kb = 4 * Math.round(gridBeatAt(g, dur > 0 ? dur / 2 : g.bar0) / 4);
+    return { bpm: typed != null ? typed * ((e && e.mul) || 1) : g.bpm, pins: [{ t: gridTimeAt(g, kb), b: 0 }], typed: typed != null };
+  }
+  // (what to compare to see whether a grid changed)
+  function gridSig(g) { return g ? g.bar0 + '|' + g.period + (g.bend ? '|' + g.pins.map(p => p.t + ':' + p.b).join(',') : '') : ''; }
+
   // ---------- settings ----------
   const KEY = 'waveView';
   // (zoom: the single player's and deck A's; zoomB: deck B's; zoomLink: one zoom for both decks)
@@ -697,9 +799,10 @@
     // the beat grid: beats (thin), bars of 4 (accent, with a tab at the top); a little past both edges, so a
     // line on the edge between two tiles is drawn whole
     if (o.grid && (o.type === 'audio' || o.type === 'analysis')) {
-      const g = o.grid, k0 = Math.ceil((tAt(-6 * dpr) - g.bar0) / g.period), k1 = Math.floor((tAt(w + 6 * dpr) - g.bar0) / g.period);
+      // (beats counted as the grid counts them: with pins, each stretch at its own tempo)
+      const g = o.grid, k0 = Math.ceil(gridBeatAt(g, tAt(-6 * dpr)) - 1e-6), k1 = Math.floor(gridBeatAt(g, tAt(w + 6 * dpr)) + 1e-6);
       for (let k = k0; k <= k1; k++) {
-        const t = g.bar0 + k * g.period;
+        const t = gridTimeAt(g, k);
         if (t < 0 || (o.dur && t > o.dur)) continue;
         const x = Math.round((t - t0) / spp), bar = ((k % 4) + 4) % 4 === 0;
         if (bar) {
@@ -891,7 +994,7 @@
     // what to draw (null: nothing); only redrawn when something in it changed
     function set(d) {
       const same = data && d && data.type === d.type && data.pk === d.pk && data.hits === d.hits && !!data.hitsPending === !!d.hitsPending && data.energy === d.energy && data.dur === d.dur &&
-        (data.grid && data.grid.bar0) === (d.grid && d.grid.bar0) && (data.grid && data.grid.period) === (d.grid && d.grid.period) && data.theme === d.theme && data.cue === d.cue &&
+        gridSig(data.grid) === gridSig(d.grid) && data.theme === d.theme && data.cue === d.cue &&
         (data.loop && data.loop.start) === (d.loop && d.loop.start) && (data.loop && data.loop.end) === (d.loop && d.loop.end) &&
         (data.loop && data.loop.sig) === (d.loop && d.loop.sig);
       if (same) return;
@@ -1185,7 +1288,7 @@
 
   root.WaveView = {
     RATE, TYPES, ZOOM_MIN, ZOOM_MAX,
-    computePeaks, peaksFromBytes, computeHits, hitsFromBytes, HIT_RATE, beatGrid, exactGrid, kickStart, popMenu, popInput, closeMenu, layoutHost, drawOnly,
+    computePeaks, peaksFromBytes, computeHits, hitsFromBytes, HIT_RATE, beatGrid, exactGrid, kickStart, pinGrid, gridBeatAt, gridTimeAt, gridLocal, gridSig, gridApart, pinStore, legacyApply, legacyPins, popMenu, popInput, closeMenu, layoutHost, drawOnly,
     ready, get settings() { return settings; }, get loaded() { return loaded; }, set, zoomBy, zoomOf,
     paintAudio, paintScroll, createScroller, scrollTimeAt, createBar, addCss, cueMark, loopMark, srcMarks
   };

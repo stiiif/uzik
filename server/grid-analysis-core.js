@@ -32,9 +32,10 @@
 //   5. The whole-number lock. Music made on a computer is at a whole BPM, sometimes a half: when the fitted
 //      tempo is within a hair of one (the grid would not move by more than a millisecond anywhere), it is
 //      that one, exactly. Otherwise the tempo is kept as measured and noted as unusual (a vinyl rip, a band).
-//   6. The 1. Three clues vote: the drum pattern (the kick is on the 1, the snare isn't), where the music
-//      changes (a new section starts on a 1), and where the bass line stops repeating the bar before (the
-//      changed stretch lies inside one bar).
+//   6. The 1. Four clues vote: the drum pattern (the kick is on the 1, the snare isn't), where the music
+//      changes (a new section starts on a 1; a swell over two bars is not a change), where the bass line stops
+//      repeating the bar before (the changed stretch lies inside one bar), and where the kick comes in after
+//      an intro or a breakdown without it (on a 1).
 //   7. Trust. Each step is checked a second, independent way: the tempo by its margin over the next best
 //      explanation and by the windows agreeing with each other; the grid by how tightly the hits sit on the
 //      line and by the windows' own count; the 1 by its clues agreeing. All agree: `ok`. Otherwise `why` says
@@ -49,7 +50,7 @@
   else root.GridAnalysisCore = factory();
 })(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
-  const GRID_V = 2;                        // the method's number: another, and every automatic grid is worked out again
+  const GRID_V = 3;                        // the method's number: another, and every automatic grid is worked out again
   const HIT_RATE = 1000, PK_RATE = 150;
   const ROW_SHIFT = [0.0033, 0.0020];      // (as waveview.js: the rows' rise starts a little before the sound)
   const TOL = 0.015;                       // a hit within 15 ms of a beat is on it
@@ -487,12 +488,13 @@
   }
 
   // ---------- 6. which beat is the 1 ----------
-  // Three clues, each giving the four beats of the bar a vote:
+  // Four clues, each giving the four beats of the bar a vote:
   //   the pattern   the kick is on the 1 (and, less, on the 3); a snare isn't on the 1 or the 3
   //   the changes   where the music changes (the bass, mids and highs over the 4 beats after a beat against the
   //                 4 before), a new section starts: on a 1
   //   the bass      where the bass line is not what it was a bar before: the changed stretch is inside one bar
-  // A clue with nothing to say (no snare and a kick everywhere; fewer than 3 changes; one bass note) stays
+  //   the entries   where the kick comes in after 16 beats or more without it: on a 1
+  // A clue with nothing to say (no snare and a kick everywhere; fewer than 3 changes; one bass note; no entry) stays
   // out. The most voted beat is the 1; sure when it wins clearly and no clue with a clear opinion says otherwise.
   function findOne(ev, peaks, bass, beatT, kLo, kHi) {
     const nB = kHi - kLo + 1, T = new Float64Array(nB + 1);
@@ -530,21 +532,26 @@
         F.push([s1 / c, s2 / c, s3 / c]);
       }
       const nov = new Float64Array(nB);
-      for (let k = 4; k < nB - 4; k++) {
-        let v = 0;
+      // (the bar after against the bar before, and against the bar before that too: a sound that rises and
+      // falls over two bars, a swell, a filter opening and closing, makes the bar after unlike the one just
+      // before at every other bar line and at every half bar, but like the one two bars back, where it was at
+      // the same point of its rise and fall. A new section is unlike both)
+      for (let k = 8; k < nB - 4; k++) {
+        let v1 = 0, v2 = 0;
         for (let band = 0; band < 3; band++) {
-          let be = 0, af = 0;
-          for (let j = 1; j <= 4; j++) { be += F[k - j][band]; af += F[k + j - 1][band]; }
-          v += Math.abs(af - be) / (af + be + 32);
+          let be = 0, b2 = 0, af = 0;
+          for (let j = 1; j <= 4; j++) { be += F[k - j][band]; b2 += F[k - 4 - j][band]; af += F[k + j - 1][band]; }
+          v1 += Math.abs(af - be) / (af + be + 32);
+          v2 += Math.abs(af - b2) / (af + b2 + 32);
         }
-        nov[k] = v;
+        nov[k] = Math.min(v1, v2);
       }
-      const sorted = Array.from(nov.slice(4, Math.max(4, nB - 4))).sort((x, y) => x - y);
+      const sorted = Array.from(nov.slice(8, Math.max(8, nB - 4))).sort((x, y) => x - y);
       const med = sorted.length ? sorted[sorted.length >> 1] : 0;
       const mad = sorted.length ? sorted.map(v => Math.abs(v - med)).sort((x, y) => x - y)[sorted.length >> 1] : 0;
       const v = [0, 0, 0, 0];
       let nP = 0;
-      for (let k = 4; k < nB - 4; k++) {
+      for (let k = 8; k < nB - 4; k++) {
         if (nov[k] < med + 2 * mad || nov[k] < 0.12) continue;
         let top = true;
         for (let j = k - 4; j <= k + 4; j++) if (j !== k && nov[j] > nov[k]) { top = false; break; }
@@ -571,6 +578,34 @@
         i = e;
       }
       clues.push({ name: 'bass', v: nV >= 3 ? v : [0, 0, 0, 0], n: nV });
+    }
+    // where the kick comes in: after an intro or a breakdown without it, the kick comes back on a 1 (a producer
+    // builds the drop that way, and a DJ counts from it). A kick on a beat after at least 16 beats with none,
+    // and kicks on most of the next 8 beats (not a lone hit). Not the first kick when it comes before 16 beats
+    // of sound (a pickup at the very start), and not when the kick plays on one beat of the bar only: then its
+    // entry is on that beat, the 3 in a one-drop, and the pattern says more.
+    {
+      const v = [0, 0, 0, 0], kp = clues[0].kp;
+      let nE = 0;
+      if (kp.filter(x => x >= 0.5).length >= 2) {
+        const on = new Uint8Array(nB);
+        for (let i = 0; i < nB; i++) { const ki = near(ev.Kt, T[i], TOL); on[i] = ki >= 0 && ev.kw[ki] >= 0.36 ? 1 : 0; }
+        // (the sound before the first entry: each beat's level, against the track's mean)
+        const d = peaks.data, lvl = i => { const fa = Math.max(0, Math.floor(T[i] * PK_RATE)), fb = Math.min(peaks.n, Math.floor(T[i + 1] * PK_RATE)); let s = 0; for (let f = fa; f < fb; f++) s += d[4 * f]; return s / Math.max(1, fb - fa); };
+        let all = 0; for (let i = 0; i < nB; i++) all += lvl(i); all /= nB || 1;
+        let last = -1;
+        for (let i = 0; i < nB; i++) {
+          if (!on[i]) continue;
+          const gap = last < 0 ? i : i - last - 1;
+          last = i;
+          if (gap < 16 || i + 8 >= nB) continue;
+          let next = 0; for (let j = i + 1; j <= i + 8; j++) next += on[j];
+          if (next < 6) continue;
+          if (gap === i) { let m = 0; for (let j = i - 16; j < i; j++) if (lvl(j) > 0.25 * all) m++; if (m < 12) continue; }
+          v[mod4(kLo + i)] += 1; nE++;
+        }
+      }
+      clues.push({ name: 'entry', v, n: nE });
     }
     // the vote
     const tot = [0, 0, 0, 0];

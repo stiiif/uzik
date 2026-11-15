@@ -43,14 +43,17 @@
 //
 // analyzeGrid(peaks, hits, { bass }) -> {
 //   v, bpm, period, t0 (a beat), bar0 (a 1: the grid is this anchor and the BPM), whole (locked on a whole or
-//   half BPM), ok, why: [{ code, ... }], notes: [{ code, ... }], conf: { ... }, drift, parts, sections: [] }
+//   half BPM), ok, why: [{ code, ... }], notes: [{ code, ... }], conf: { ... }, drift, parts,
+//   sections: [{ t, k, c }] (k: intro, kicks, main, break, drop, outro; c: how clear the change is, 0 to 1),
+//   cue: { t, ok, why: [codes], alts: [t], low } (the cue by the user's rule; alts: the other places when unsure),
+//   phrase: { o, conf } }
 // or { v, bpm: null, ok: false, why: [{ code: 'none' }] } when no steady beat is found.
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) module.exports = factory();
   else root.GridAnalysisCore = factory();
 })(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
-  const GRID_V = 3;                        // the method's number: another, and every automatic grid is worked out again
+  const GRID_V = 4;                        // the method's number: another, and every automatic grid is worked out again
   const HIT_RATE = 1000, PK_RATE = 150;
   const ROW_SHIFT = [0.0033, 0.0020];      // (as waveview.js: the rows' rise starts a little before the sound)
   const TOL = 0.015;                       // a hit within 15 ms of a beat is on it
@@ -481,10 +484,210 @@
       margin: Math.round(Math.min(9, margin) * 100) / 100, agree: voters ? Math.round(agree / voters * 100) / 100 : null, score: Math.round(raw.agg * 100) / 100, bar: one.conf };
     const out = { v: GRID_V, bpm: 60 / period, period, t0, bar0, whole, exact: true, ok: !why.length, why, notes, conf, drift, parts,
       families: { kicks: ev.kicks, snares: ev.snares, hats: ev.hats }, sections: [] };
+    // -- 8. the structure: the sections, the phrase grid, the cue (on the grid just found)
+    const st = analyzeStructure(ev, peaks, hits, bar0, period, dur, opts.debug, one.ok, out.ok);
+    if (st) { out.sections = st.sections; out.cue = st.cue; out.phrase = st.phrase; if (opts.structure) out.structure = st; }
     // (for the test bench's close look: what was weighed)
     if (opts.debug) out.dbg = { clusters: clusters.map(c => ({ bpm: c.bpm, agg: c.agg, cK: c.cK, c: c.c, alt: c.alt, n: c.list.length })), seed: { bpm: seed.bpm, a: seed.a, t0: seed.t0, score: seed.score, c: seed.c, e: seed.e, alt: seed.alt, even: seed.even },
       lines: lines.map(l => ({ row: l.row, n: l.ks.length, m: l.fit.m, rms: l.rms, kicks: l.kicks, on: l.on })) };
     return out;
+  }
+
+  // ---------- 8. the structure: the sections, the phrase grid, the cue ----------
+  // On the grid found (bar 1 at bar0), each bar is described: its kicks, its snares and claps, its hats (per beat),
+  // its level in the four bands of the waveform, and whether it is "on the grid" (its hits on the grid's 16ths, or
+  // its sound rising and falling the same way bar after bar: a pad's chord struck on each bar line).
+  // - Where the music changes: four bars after a bar line against the four before it (four bars: a sound that comes
+  //   and goes every bar or every two bars is the same on both sides, and makes no change). The peaks are the
+  //   changes.
+  // - The phrase grid: which bars counted in eights (0 to 7) the changes land on, the strong ones weighing most.
+  // - The sections: from change to change; named by what plays (intro before the drums, "kicks in" where they come,
+  //   break without them, drop when they come back, outro at the end, main otherwise).
+  // - The cue, by the user's rule: from the first clear phrase start (where the drums come in, on the phrase grid),
+  //   back by 64 bars while they fit, then 32, 16, 8, 4, never into a free intro off the grid; if not even 4 bars
+  //   fit, the first kick. With the phrase grid unsure, two more candidates (from the next best counts).
+  // -> { sections: [{ t, k, c }], phrase: { o, conf }, cue: { t, ok, why, alts: [t] }, bars: n } or null
+  const SEC_NAMES = ['intro', 'kicks', 'main', 'break', 'drop', 'outro'];
+  function analyzeStructure(ev, peaks, hits, one, period, dur, debug, oneOk, gridOk) {
+    // (bar 0 here: the first bar line at or after 0:00)
+    const B = 4 * period, bar0 = one - Math.floor(one / B + 1e-9) * B, n = Math.floor((dur - bar0) / B + 1e-6);
+    if (!(period > 0) || n < 16) return null;
+    const bt = k => bar0 + k * B, pd = peaks.data, pn = peaks.n;
+    const count = (T, W, thr, a, b) => { let c = 0; for (let i = lower(T, a); i < T.length && T[i] < b; i++) if (W[i] >= thr) c++; return c; };
+    const K = new Float32Array(n), S = new Float32Array(n), H = new Float32Array(n), E = [0, 1, 2, 3].map(() => new Float32Array(n));
+    const down = new Uint8Array(n), grid = new Uint8Array(n), hitsOn = new Float32Array(n), comb = new Float32Array(n), env = [];
+    const combOn = [new Float32Array(n), new Float32Array(n)], combOff = [new Float32Array(n), new Float32Array(n)];
+    // (every hit, the hats' row too: the grid analysis reads the kicks' and snares' rows only)
+    const HT = rowOnsets(hits.data, hits.n, 2, 24).t, allT = Float64Array.from([...ev.allT, ...HT]).sort();
+    const eighth = period / 4;
+    for (let k = 0; k < n; k++) {
+      const a = bt(k) - 0.03, b = bt(k + 1) - 0.03;
+      K[k] = count(ev.Kt, ev.kw, 0.09, a, b) / 4;
+      S[k] = count(ev.St, ev.sw, 0.3, a, b) / 4;
+      H[k] = count(ev.St, ev.hw, 0.01, a, b) / 8;
+      down[k] = (near(ev.Kt, bt(k), 0.03) >= 0 && ev.kw[near(ev.Kt, bt(k), 0.03)] >= 0.36) || (near(ev.St, bt(k), 0.03) >= 0 && ev.sw[near(ev.St, bt(k), 0.03)] >= 0.3) ? 1 : 0;
+      // the waveform's four bands over the bar, and its loudness in 16 steps (for "the same every bar")
+      const fa = Math.max(0, Math.floor(bt(k) * PK_RATE)), fb = Math.min(pn, Math.floor(bt(k + 1) * PK_RATE));
+      const steps = new Float32Array(16);
+      for (let j = 0; j < 4; j++) { let s2 = 0; for (let f = fa; f < fb; f++) s2 += pd[4 * f + j]; E[j][k] = s2 / Math.max(1, fb - fa); }
+      for (let q = 0; q < 16; q++) { const f0 = Math.floor((bt(k) + q * B / 16) * PK_RATE), f1 = Math.floor((bt(k) + (q + 1) * B / 16) * PK_RATE); let s2 = 0; for (let f = f0; f < f1 && f < pn; f++) s2 += pd[4 * f]; steps[q] = s2 / Math.max(1, f1 - f0); }
+      env.push(steps);
+      // hits on the grid: the share of the bar's hits (of any weight: a hat counts) within 20 ms of a 16th
+      let on = 0, all = 0;
+      for (let i = lower(allT, bt(k) - 0.02); i < allT.length && allT[i] < bt(k + 1) - 0.02; i++) {
+        const x = (allT[i] - bt(k)) / eighth, off = Math.abs(x - Math.round(x)) * eighth;
+        all++; if (off <= 0.02) on++;
+      }
+      hitsOn[k] = all >= 6 ? on / all : -1;
+      // and the waveform's highs (and its whole): louder on the grid's 16ths than halfway between them: quiet hats
+      // the hits don't see, a shaker. (Pads, an ambient wash, loose noises: the same on and between.)
+      for (const j of [3, 0]) {   // (kept apart, then read over two bars: a few loose hits don't make it)
+        let onL = 0, offL = 0;
+        for (let q = 0; q < 16; q++) {
+          const f = Math.floor((bt(k) + q * B / 16) * PK_RATE), fm = Math.floor((bt(k) + (q + 0.5) * B / 16) * PK_RATE);
+          // (the loudest of four frames at each: on the line, and halfway)
+          let mx = 0, mo = 0; for (let x = -1; x <= 2; x++) { if (f + x >= 0 && f + x < pn) mx = Math.max(mx, pd[4 * (f + x) + j]); if (fm + x >= 0 && fm + x < pn) mo = Math.max(mo, pd[4 * (fm + x) + j]); }
+          // (a line struck: clearly louder than halfway after it; a halfway point struck: the other way round)
+          if (mx >= 8 && mx > 1.6 * mo + 2) onL++; else if (mo >= 8 && mo > 1.6 * mx + 2) offL++;
+        }
+        combOn[j >> 1][k] = onL; combOff[j >> 1][k] = offL;
+      }
+    }
+    // (the same rise and fall as the next bar: a correlation over the 16 steps, with something to correlate)
+    const same = (u, v) => { let mu = 0, mv = 0; for (let q = 0; q < 16; q++) { mu += u[q]; mv += v[q]; } mu /= 16; mv /= 16;
+      let suv = 0, suu = 0, svv = 0; for (let q = 0; q < 16; q++) { suv += (u[q] - mu) * (v[q] - mv); suu += (u[q] - mu) ** 2; svv += (v[q] - mv) ** 2; }
+      if (Math.sqrt(suu / 16) < 0.04 * mu + 0.6 || Math.sqrt(svv / 16) < 0.04 * mv + 0.6) return 0; return suv / Math.sqrt(suu * svv); };
+    for (let k = 0; k < n; k++) for (let j = 0; j < 2; j++) {
+      // (over two bars: 8 lines struck or more, three times the halfway points struck)
+      const k2 = k + 1 < n ? k + 1 : k - 1, on2 = combOn[j][k] + combOn[j][k2], off2 = combOff[j][k] + combOff[j][k2];
+      comb[k] = Math.max(comb[k], on2 >= 8 && on2 >= 3 * off2 && combOn[j][k] >= 3 && combOn[j][k] >= 2 * combOff[j][k] ? 2 : 0);   // (the bar itself struck too)
+    }
+    for (let k = 0; k < n; k++) {
+      // (a bar like the next and that one like the one after it, or the same two bars on: a swell over two bars;
+      //  forwards or backwards. Twice in a row, so a sound that wobbles at its own speed doesn't pass by chance)
+      const rep2 = (j, d) => k + 2 * j * d >= 0 && k + 2 * j * d < n && same(env[k], env[k + j * d]) >= 0.6 && same(env[k + j * d], env[k + 2 * j * d]) >= 0.6;
+      // (2: on the grid by its hits; 1: by its sound repeating only, which a free intro can do by chance)
+      grid[k] = hitsOn[k] >= 0.7 || comb[k] >= 1.3 ? 2 : rep2(1, 1) || rep2(1, -1) || rep2(2, 1) || rep2(2, -1) ? 1 : 0;
+    }
+    // the bands to the track's own scale (their 95th percentile)
+    const En = E.map(e => { const q = pct(Array.from(e), 0.95) || 1; return Float32Array.from(e, v => Math.min(1.5, v / q)); });
+    // (drums: kicks on half the beats, or kicks and snares together; a broken beat leaves a bar without a kick
+    // now and then, so a kick in the bar next to it counts)
+    const kAt = k => k >= 0 && k < n ? K[k] : 0;
+    // (a section's fullness: its level, its hats, its low end; an outro under 90 % of the section before it)
+    const OR = 0.9, LV = k => En[0][k] + Math.min(1, H[k]) + En[1][k];
+    const drums = k => K[k] >= 0.45 || (K[k] + S[k] >= 0.5 && Math.max(K[k], kAt(k - 1), kAt(k + 1)) >= 0.2);
+    // -- the changes
+    const F = k => [2 * Math.min(1, K[k]), Math.min(1, S[k]), Math.min(1, H[k]), En[0][k], En[1][k], En[2][k], En[3][k]];
+    const Fk = []; for (let k = 0; k < n; k++) Fk.push(F(k));
+    const nov = new Float32Array(n);
+    for (let b = 1; b < n; b++) {
+      const w = Math.min(4, b, n - b);
+      let v = 0;
+      for (let j = 0; j < 7; j++) { let af = 0, be = 0; for (let i = 0; i < w; i++) { af += Fk[b + i][j]; be += Fk[b - 1 - i][j]; } v += Math.abs(af - be) / w; }
+      nov[b] = v;
+    }
+    const nv = Array.from(nov.slice(1)).sort((x, y) => x - y), med = nv[nv.length >> 1], mad = nv.map(x => Math.abs(x - med)).sort((x, y) => x - y)[nv.length >> 1];
+    const thr = Math.max(0.6, med + 3 * mad);   // (a loop with nothing changing: no sections)
+    const peaksAt = [];
+    for (let b = 2; b < n - 1; b++) {    // (not the first bar or the last: a fade, a tail)
+      if (nov[b] < thr) continue;
+      let top = true; for (let j = Math.max(1, b - 2); j <= Math.min(n - 1, b + 2); j++) if (j !== b && (nov[j] > nov[b] || (nov[j] === nov[b] && j < b))) top = false;
+      if (top) peaksAt.push(b);
+    }
+    // -- the phrase grid: the count of eight the changes land on (their strength squared)
+    const sc = new Float64Array(8);
+    for (const b of peaksAt) sc[b % 8] += nov[b] * nov[b];
+    const order = [0, 1, 2, 3, 4, 5, 6, 7].sort((x, y) => sc[y] - sc[x]);
+    const o = order[0], conf = sc[order[1]] > 0 ? sc[o] / sc[order[1]] : sc[o] > 0 ? 9 : 0;
+    // the section starts: the changes, each onto the phrase grid when a bar off it (and the change there nearly as
+    // strong); a change between two others closer than 2 bars, the weaker one left out
+    const starts = [];
+    for (const b of peaksAt) {
+      let c = b;
+      for (const d of [-1, 1]) if ((b + d) % 8 === o && (b % 8) !== o && nov[b + d] >= 0.6 * nov[b]) c = b + d;
+      if (!starts.includes(c)) starts.push(c);
+    }
+    // -- the drums come in: the first bar of four with drums, its 1 struck (a pickup's bar has drums only after it)
+    let P = -1;
+    for (let k = 0; k + 3 < n; k++) if (drums(k) && K[k] >= 0.2 && drums(k + 1) && drums(k + 2) && drums(k + 3)) { P = k; break; }
+    // (a pickup: the bar has its drums after its 1 only, fewer than the next bar's)
+    if (P >= 0 && P + 1 < n && !down[P] && down[P + 1] && K[P] + S[P] < 0.8 * (K[P + 1] + S[P + 1])) P++;
+    if (P < 0) P = 0;
+    // (the drums come in a bar or three before a clear change on the phrase count: that change is the phrase start,
+    // the bars before it a lead-in)
+    const P0 = P;
+    if (conf >= 1.5 && P % 8 !== o) for (let d = 1; d <= 3; d++) {
+      const b = P + d;
+      if (b < n && b % 8 === o && peaksAt.includes(b) && nov[b] >= 1 && drums(b)) { P = b; break; }
+    }
+    if (P > 0 && !starts.includes(P)) starts.push(P);
+    starts.sort((x, y) => x - y);
+    // -- the sections, named
+    const seg = [0, ...starts.filter(b => b > 0 && b < n)], sections = [];
+    let level = 0;
+    for (let i = 0; i < seg.length; i++) {
+      const a = seg[i], b = i + 1 < seg.length ? seg[i + 1] : n;
+      let dr = 0, lv = 0; for (let k = a; k < b; k++) { dr += drums(k) ? 1 : 0; lv += LV(k); }
+      sections.push({ a, b, drums: dr / (b - a) >= 0.5, lv: lv / (b - a) });
+      if (dr / (b - a) >= 0.5) level = Math.max(level, lv / (b - a));
+    }
+    let seen = false, afterBreak = false;
+    for (let i = 0; i < sections.length; i++) {
+      const x = sections[i];
+      if (!x.drums) x.k = seen ? 'break' : 'intro';
+      else if (!seen) x.k = i === 0 ? 'main' : 'kicks';
+      else x.k = afterBreak ? 'drop' : 'main';
+      if (x.drums) seen = true;
+      afterBreak = !x.drums && seen;
+    }
+    // (the start: drums alone before the full sound, a DJ's intro, is the intro too)
+    if (sections.length > 1 && sections[0].drums && sections[1].drums && sections[0].lv < OR * sections[1].lv) sections[0].k = 'intro';
+    // (the end: the last section when it has no drums, or the drums with less around them than the section before;
+    // back from there while each is thinner than the one before it)
+    for (let i = sections.length - 1; i > 0; i--) {
+      const x = sections[i], y = sections[i - 1];
+      if ((!x.drums && i === sections.length - 1) || (x.drums && y.drums && x.lv < OR * y.lv)) x.k = 'outro'; else break;
+    }
+    // (an intro, a break or an outro is one block: its changes inside it, a riser, a sound leaving, are not new
+    // sections)
+    for (let i = sections.length - 1; i > 0; i--) {
+      const x = sections[i], y = sections[i - 1];
+      if (x.k === y.k && (x.k === 'intro' || x.k === 'break' || x.k === 'outro')) { y.b = x.b; sections.splice(i, 1); }
+    }
+    // -- the cue: from the drums' start, back as far as the grid holds the music (never into a free intro)
+    // (one bar off the grid alone, a fill, a break of a bar, doesn't end it: two in a row do)
+    let low = P;
+    while (low > 0 && (grid[low - 1] || (low > 1 && grid[low - 2]))) low -= grid[low - 1] ? 1 : 2;
+    const cueBar = from => { let c = from, went = false; for (const step of [64, 32, 16, 8, 4]) while (c - step >= low) { c -= step; went = true; } return { c, went }; };
+    const firstKick = () => { const i = ev.Kt.findIndex((t, j) => ev.kw[j] >= 0.36 && t >= bt(low) - 0.03); return i >= 0 ? ev.Kt[i] : bt(P); };
+    const cueOf = from => { const r = cueBar(from); return !r.went && from - low >= 1 ? firstKick() : bt(r.c); };
+    const why = [];
+    if (conf < 1.3 && peaksAt.length >= 2) why.push('phrase');
+    if (peaksAt.length < 2) why.push('flat');
+    if (gridOk === false) why.push('grid');   // (the grid itself is unsure: a drift, a jump, loose playing)
+    if (oneOk === false) why.push('one');   // (the grid's 1 unsure: the cue's bar line with it)
+    // (an intro of 4 bars or more on the grid by its repeating sound alone: a pad on the tempo, or a free intro)
+    { let soft = 0; for (let k = low; k < P; k++) if (grid[k] === 1) soft++; if (soft >= 4) why.push('intro'); }
+    const t = cueOf(P), alts = [];
+    if (P !== P0) { const t0 = cueOf(P0); if (Math.abs(t0 - t) > 0.01) alts.push(t0); }   // (the drums' own start)
+    // (the other candidates: the drums' start moved onto the next best counts of four, and the first kick)
+    for (const oo of order.slice(1, 3)) {
+      if (sc[oo] <= 0) continue;
+      let p2 = P; for (const d of [1, -1, 2, -2, 3, -3]) if (P + d >= 0 && (P + d) % 4 === oo % 4) { p2 = P + d; break; }
+      const t2 = cueOf(p2); if (Math.abs(t2 - t) > 0.01 && !alts.some(x => Math.abs(x - t2) < 0.01)) alts.push(t2);
+    }
+    // (the drums' start: first among the others when the intro may be free)
+    { const fk = firstKick(); if (Math.abs(fk - t) > 0.05 && !alts.some(x => Math.abs(x - fk) < 0.05)) { if (why.includes('intro')) alts.unshift(fk); else if (alts.length < 2) alts.push(fk); } }
+    const r3 = x => Math.round(x * 1000) / 1000;
+    const res = {
+      bars: n, phrase: { o, conf: Math.round(Math.min(9, conf) * 100) / 100 },
+      sections: sections.map(x => ({ t: r3(bt(x.a)), k: x.k, c: Math.round(Math.min(1, x.a === 0 ? 1 : nov[x.a] / (2 * thr)) * 100) / 100 })),
+      cue: { t: r3(t), ok: !why.length, why, alts: alts.slice(0, 2).map(r3), low: r3(bt(low)) }
+    };
+    if (debug) res.dbg = { P, low, o, conf: res.phrase.conf, grid: Array.from(grid.slice(0, P + 2)).join(''), K: Array.from(K.slice(0, Math.min(P + 2, 30)), v => Math.round(v * 4)).join(''), S: Array.from(S.slice(0, Math.min(P + 2, 30)), v => Math.round(v * 4)).join(''), on: Array.from(hitsOn.slice(Math.max(0, P - 3), P + 2), v => Math.round(v * 10)).join(','), comb: Array.from(comb.slice(Math.max(0, P - 3), P + 2), v => Math.round(v * 100) / 100).join(','),
+      peaks: peaksAt.map(b => [b, Math.round(nov[b] * 100) / 100]) };
+    return res;
   }
 
   // ---------- 6. which beat is the 1 ----------
@@ -648,5 +851,13 @@
     }
   }
 
-  return { GRID_V, analyzeGrid, bassBand, bassNotes, findEvents, hitStart, reasonText };
+  // the structure as kept in a track's grid record (the app's and the server's): the sections and the cue, times
+  // in ms; nothing when the analysis found none
+  function structRecord(g) {
+    const r3 = x => Math.round(x * 1000) / 1000, out = {};
+    if (g && Array.isArray(g.sections) && g.sections.length) out.sec = g.sections.map(x => ({ t: r3(x.t), k: x.k, c: x.c }));
+    if (g && g.cue && typeof g.cue.t === 'number') out.cue = { t: r3(g.cue.t), ok: g.cue.ok ? 1 : 0, why: g.cue.why || [], alts: (g.cue.alts || []).map(r3), ...(typeof g.cue.low === "number" ? { low: r3(g.cue.low) } : {}) };
+    return out;
+  }
+  return { GRID_V, analyzeGrid, bassBand, bassNotes, findEvents, hitStart, reasonText, structRecord, SEC_NAMES };
 });

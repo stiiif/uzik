@@ -31,10 +31,12 @@ async function analyzeGridOf(left, right, sampleRate) {
 
 // The record kept for a track (core kind 'grids', synced to the devices; the same shape Uzikext writes):
 // { path, a: the method's number, bpm, t: a 1 (s; the grid is this anchor and the BPM), ok: 1 nothing to check
-// / 0 to check, why: [the reasons, as codes], notes: [unusual but fine], ts: when, by: 'server' }
+// / 0 to check, why: [the reasons, as codes], notes: [unusual but fine], sec: [the sections: { t, k, c }],
+// cue: { t, ok, why, alts, low } (the cue by the user's rule; low: where the grid starts holding the music),
+// ts: when, by: 'server' }
 function gridRecord(path, g, ts) {
   return { path, a: GridCore.GRID_V, bpm: g && g.bpm ? g.bpm : null, t: g && g.bpm ? Math.round(g.bar0 * 1e5) / 1e5 : 0,
-    ok: g && g.ok ? 1 : 0, why: (g && g.why) || [{ code: 'none' }], notes: (g && g.notes) || [], ts, by: 'server' };
+    ok: g && g.ok ? 1 : 0, why: (g && g.why) || [{ code: 'none' }], notes: (g && g.notes) || [], ...(g && g.bpm ? GridCore.structRecord(g) : {}), ts, by: 'server' };
 }
 
 module.exports = { analyzeGridOf, gridRecord, TOO_LONG, GRID_V: GridCore.GRID_V };

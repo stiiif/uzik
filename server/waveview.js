@@ -18,7 +18,9 @@
   'use strict';
   const RATE = 150;
   const TYPES = ['art', 'analysis', 'audio'];
-  const ZOOM_MIN = 1, ZOOM_MAX = 30;
+  // (the scrolling view's zoom: the seconds each side of the playhead; out to the whole track, which each view
+  // caps at its track's length)
+  const ZOOM_MIN = 0.5, ZOOM_MAX = 1800;
 
   // ---------- computing the waveform data ----------
   // RBJ biquad (Q = 1/√2: Butterworth), as [b0, b1, b2, a1, a2]
@@ -560,8 +562,9 @@
 
   // ---------- settings ----------
   const KEY = 'waveView';
-  // (zoom: the single player's and deck A's; zoomB: deck B's; zoomLink: one zoom for both decks)
-  const DEFAULTS = { split: false, main: 'analysis', top: 'audio', zoom: 5, zoomB: 0, zoomLink: false, runBelow: false, fullness: 0.35, fill: 1 };
+  // (zoom: the single player's and deck A's; zoomB: deck B's; zoomLink: one zoom for both decks; sections, bars:
+  // the band of sections and the bar numbers outside Grid prep, which has its own)
+  const DEFAULTS = { split: false, main: 'analysis', top: 'audio', zoom: 5, zoomB: 0, zoomLink: false, runBelow: false, fullness: 0.35, fill: 1, sections: true, bars: true };
   let settings = Object.assign({}, DEFAULTS), loaded = false;
   const store = () => (root.chrome && chrome.storage && chrome.storage.local) || null;
   function clean(s) {
@@ -573,6 +576,7 @@
     o.zoomB = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, Number(o.zoomB) || o.zoom));
     o.zoomLink = !!o.zoomLink;
     o.runBelow = !!o.runBelow;
+    o.sections = o.sections !== false; o.bars = o.bars !== false;
     const unit = (v, d) => { v = Number(v); return isFinite(v) ? Math.max(0, Math.min(1, v)) : d; };
     o.fullness = unit(o.fullness, DEFAULTS.fullness); o.fill = unit(o.fill, DEFAULTS.fill);
     return o;
@@ -800,11 +804,17 @@
     // line on the edge between two tiles is drawn whole
     if (o.grid && (o.type === 'audio' || o.type === 'analysis')) {
       // (beats counted as the grid counts them: with pins, each stretch at its own tempo)
+      // (zoomed far out: the beats go when closer than 5 px, then the bars are thinned to every 2, 4, 8… (11 px apart), counted
+      // from bar 1, o.bar1: the cue's)
       const g = o.grid, k0 = Math.ceil(gridBeatAt(g, tAt(-6 * dpr)) - 1e-6), k1 = Math.floor(gridBeatAt(g, tAt(w + 6 * dpr)) + 1e-6);
-      for (let k = k0; k <= k1; k++) {
+      const beatPx = gridLocal(g, tAt(w / 2)).period / spp, beats = beatPx >= 5 * dpr;
+      let every = 4; while (every * beatPx < 11 * dpr && every < 4096) every *= 2;
+      const b1 = Math.round(o.bar1 || 0);
+      for (let k = beats ? k0 : k0 + ((((b1 - k0) % every) + every) % every); k <= k1; k += beats ? 1 : every) {
         const t = gridTimeAt(g, k);
         if (t < 0 || (o.dur && t > o.dur)) continue;
         const x = Math.round((t - t0) / spp), bar = ((k % 4) + 4) % 4 === 0;
+        if (beats && bar && every > 4 && (((k - b1) % every) + every) % every !== 0) continue;
         if (bar) {
           ctx.fillStyle = cols.bar;
           ctx.fillRect(x - dpr, 0, 2 * dpr, h);
@@ -894,13 +904,18 @@
     // paused, after zooming at the mouse: the view's own centre (the playhead then wherever it falls in it);
     // null: the view follows the playhead (always while playing)
     let free = null;
+    // fitted to a stretch (fit): this view's own zoom, apart from the setting (ovr), and its centre kept while the
+    // music plays through it (hold), until the playhead leaves the view
+    let ovr = null, hold = false, fitKey = null;
+    const cap = () => data && data.dur > 0 ? Math.max(ZOOM_MIN * 2, data.dur / 2 * 1.04) : ZOOM_MAX;
+    const zoomNow = () => ovr != null ? ovr : Math.min(zoomOf(zid()), cap());
     const xOf = pos => W / 2 - pos * pps;
     const tx = pos => `translate3d(${xOf(pos).toFixed(2)}px,0,0)`;
     function measure() {
-      const g = `${box.clientWidth}|${box.clientHeight}|${window.devicePixelRatio || 1}|${zoomOf(zid())}`;
+      const g = `${box.clientWidth}|${box.clientHeight}|${window.devicePixelRatio || 1}|${zoomNow()}`;
       if (g === geo) return false;
       geo = g;
-      W = box.clientWidth; H = box.clientHeight; dpr = window.devicePixelRatio || 1; zoom = zoomOf(zid());
+      W = box.clientWidth; H = box.clientHeight; dpr = window.devicePixelRatio || 1; zoom = zoomNow();
       pps = W > 0 ? W / (2 * zoom) : 1;
       return true;
     }
@@ -940,7 +955,7 @@
       if (measure()) clearTiles();
       stopAnim();
       // (the playhead moved out of the view, a seek or a move: the view follows it again; a zoom keeps it free)
-      if (free != null && Math.abs(pos - lastPos) > 1e-6 && Math.abs(pos - free) > zoom) free = null;
+      if (free != null && Math.abs(pos - lastPos) > 1e-6 && Math.abs(pos - free) > zoom) { free = null; hold = false; }
       lastPos = pos;
       const c = free == null ? pos : free;
       strip.style.transform = tx(c);
@@ -950,19 +965,46 @@
     }
     // the mouse wheel at a point of the view (frac: 0…1 across it): paused, the music under the mouse stays under
     // it (the view leaves the playhead); playing, the zoom is around the playhead, which the view follows
+    // (fitted: the view's own zoom changes, not the setting; from what's shown, never past the whole track)
+    function zoomStep(steps) {
+      const z = Math.max(ZOOM_MIN, Math.min(cap(), zoomNow() * Math.pow(1.15, steps)));
+      if (ovr != null) { ovr = z; geo = ''; } else zoomTo(z, zid());
+    }
     function zoomAt(frac, steps) {
-      if (anim) { zoomBy(steps, zid()); return; }
+      if (anim) { zoomStep(steps); return; }   // (playing: the next follow() measures the new zoom)
       measure();
       const c0 = free == null ? lastPos : free, t = c0 + (frac - 0.5) * 2 * zoom;
-      zoomBy(steps, zid());
+      zoomStep(steps);
       measure();
-      free = t - (frac - 0.5) * 2 * zoomOf(zid());
+      free = t - (frac - 0.5) * 2 * zoomNow();
       place(lastPos);
+    }
+    // fit the view to t0…t1 (this view only; the playhead stays where it is), or back to the zoom of the setting
+    function fit(t0, t1, key) {
+      if (!(t1 > t0)) return;
+      ovr = Math.max(ZOOM_MIN, Math.min(cap(), (t1 - t0) / 2)); free = (t0 + t1) / 2; hold = true; fitKey = key == null ? null : key;
+      geo = ''; stopAnim(); measure(); clearTiles(); place(lastPos);
+    }
+    function unfit() {
+      if (ovr == null && !hold) return;
+      ovr = null; hold = false; fitKey = null; free = null;
+      geo = ''; stopAnim(); measure(); clearTiles(); place(lastPos);
     }
     // the music runs at `rate` from `pos`, its real position at the moment `at` (performance.now(); now if
     // not given)
     function follow(pos, rate, playing, at) {
       if (!playing || !rate) { place(pos); return; }
+      // (fitted to a stretch: the view stays on it while the playhead runs through it)
+      if (hold && free != null && Math.abs(pos - free) <= zoom) {
+        if (measure()) clearTiles();
+        stopAnim();
+        lastPos = pos;
+        strip.style.transform = tx(free);
+        ensure(free, 2);
+        head(pos, free);
+        return;
+      }
+      hold = false;
       if (free != null) { free = null; head(pos, pos); }   // (playing: the view follows the playhead again)
       if (measure()) { clearTiles(); stopAnim(); }
       const now = performance.now();
@@ -996,8 +1038,9 @@
       const same = data && d && data.type === d.type && data.pk === d.pk && data.hits === d.hits && !!data.hitsPending === !!d.hitsPending && data.energy === d.energy && data.dur === d.dur &&
         gridSig(data.grid) === gridSig(d.grid) && data.theme === d.theme && data.cue === d.cue &&
         (data.loop && data.loop.start) === (d.loop && d.loop.start) && (data.loop && data.loop.end) === (d.loop && d.loop.end) &&
-        (data.loop && data.loop.sig) === (d.loop && d.loop.sig);
+        (data.loop && data.loop.sig) === (d.loop && d.loop.sig) && data.bar1 === d.bar1;
       if (same) return;
+      if (!d || !data || d.dur !== data.dur || d.pk !== data.pk) { ovr = null; hold = false; fitKey = null; }   // (another track: no fit)
       data = d;
       box.classList.toggle('wv-on', !!d);
       measure();
@@ -1007,7 +1050,7 @@
     // the size, the zoom or the colours changed
     function refresh() { geo = ''; measure(); clearTiles(); const p = anim ? animPos() : lastPos, r = aRate, on = !!anim; stopAnim(); if (on) follow(p, r, true); else place(p); }
     // (pos: the time at the view's centre, for what's under a point of it: scrollTimeAt)
-    return { get id() { return zid(); }, place, follow, set, refresh, zoomAt, get zoom() { measure(); return zoom; }, get pos() { return anim ? animPos() : (free == null ? lastPos : free); }, get free() { return free != null; }, el: strip,
+    return { get id() { return zid(); }, place, follow, set, refresh, zoomAt, fit, unfit, get fitted() { return ovr != null ? fitKey : null; }, get zoom() { measure(); return zoom; }, get pos() { return anim ? animPos() : (free == null ? lastPos : free); }, get free() { return free != null; }, el: strip,
       layer, get pps() { return pps; }, get running() { return !!anim; }, set onPlace(fn) { hook = fn; } };
   }
 
@@ -1058,6 +1101,12 @@
 
   // a view's zoom (the seconds shown each side of its playhead): each deck its own, or one for both (zoomLink)
   function zoomOf(id) { return id === 'b' && !settings.zoomLink ? settings.zoomB : settings.zoom; }
+  // set the zoom of that view (both, linked)
+  function zoomTo(z, id = 'a') {
+    if (settings.zoomLink) set({ zoom: z, zoomB: z });
+    else if (id === 'b') set({ zoomB: z });
+    else set({ zoom: z });
+  }
   // zoom by wheel steps (in: smaller window), that view's (both, linked)
   function zoomBy(steps, id = 'a') {
     const f = Math.pow(1.15, steps);

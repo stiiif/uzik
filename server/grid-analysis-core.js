@@ -40,6 +40,13 @@
 //      own lag behind the kick taken off), then the fewest pins that keep the curve within 4 ms. Where the drums give
 //      too little (a dub's drop, the kicks out), the grid is drawn straight across and the stretch is doubtful
 //      (`doubt`). Taken only when it sits clearly better on the drums than the line or stage 5's pins.
+//      Method 7 (20 Nov, after the user's Malcom X Dub): the beat path's step from beat to beat costs by the tempo the
+//      windows read there when it is 1.5 % or more from the mean (a band that speeds up for good near the end); the
+//      drums playing before the first sure beat or after the last are doubtful too (not drawn on at the tempo next
+//      to them while called sure). And when no steady beat is found (2.): once more with the low hits counted by their
+//      beater's click (a dub's busy, loud bass line, its notes taken for kicks: note `bassy`); then, for sparse drums
+//      that score too low anywhere, when two thirds of the windows read the same tempo (or its double, its half) as
+//      their best, that tempo, said to be faint (`faint`, to check). A track with no drums stays without a grid.
 //   5. The whole-number lock. Music made on a computer is at a whole BPM, sometimes a half: when the fitted
 //      tempo is within a hair of one (the grid would not move by more than a millisecond anywhere), it is
 //      that one, exactly. Otherwise the tempo is kept as measured and noted as unusual (a vinyl rip, a band).
@@ -65,7 +72,7 @@
   else root.GridAnalysisCore = factory();
 })(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
-  const GRID_V = 6;                        // the method's number: another, and every automatic grid is worked out again
+  const GRID_V = 7;                        // the method's number: another, and every automatic grid is worked out again
   const HIT_RATE = 1000, PK_RATE = 150;
   const ROW_SHIFT = [0.0033, 0.0020];      // (as waveview.js: the rows' rise starts a little before the sound)
   const TOL = 0.015;                       // a hit within 15 ms of a beat is on it
@@ -137,7 +144,7 @@
   //   adds (the least of the hits that come with a kick) is taken off, so a clap on a kick still counts and a
   //   bare kick doesn't.
   //   A hat: a hit of the upper row with no body, only highs.
-  function findEvents(hits, peaks) {
+  function findEvents(hits, peaks, opts = {}) {
     const K = rowOnsets(hits.data, hits.n, 0, 24), S = rowOnsets(hits.data, hits.n, 1, 24);
     const pd = peaks.data, pn = peaks.n;
     const rise = (t, o) => {
@@ -147,9 +154,35 @@
       for (let j = f; j <= f + 3; j++) if (j >= 0 && j < pn) af = Math.max(af, pd[4 * j + o]);
       return be === 255 ? 0 : Math.max(0, af - be);
     };
-    const refK = pct(K.s, 0.9), nK = K.t.length, nS = S.t.length;
+    let refK = pct(K.s, 0.9);
+    const nK = K.t.length, nS = S.t.length;
     const kw = new Float32Array(nK);
     for (let i = 0; i < nK; i++) { const r = refK > 0 ? K.s[i] / refK : 0; kw[i] = r >= 0.3 ? Math.min(1, r * r) : 0; }
+    // A kick is a beater on a skin: its click comes with its low thump (the upper row rises with it). A bass note has
+    // its low thump and next to no click. With `click` (asked for when the low hits make no steady beat at all: a dub's
+    // busy, loud bass line, its notes as sharp as the kick and most of them off the beat): each low hit counts by its
+    // click against the track's clicking ones, and the kicks are weighed against each other, not against the bass.
+    let clicked = false;
+    if (opts.click) {
+      const click = new Float32Array(nK), hd = hits.data, hn = hits.n;
+      for (let i = 0; i < nK; i++) {
+        const c = Math.round(K.t[i] * HIT_RATE);
+        let lo = 255, hi = 0;
+        for (let j = Math.max(0, c - 25); j < c - 3; j++) if (hd[3 * j + 1] < lo) lo = hd[3 * j + 1];
+        for (let j = Math.max(0, c - 3); j <= Math.min(hn - 1, c + 12); j++) if (hd[3 * j + 1] > hi) hi = hd[3 * j + 1];
+        click[i] = lo === 255 ? 0 : Math.max(0, hi - lo);
+      }
+      const strong = []; for (let i = 0; i < nK; i++) if (kw[i] >= 0.3) strong.push(click[i]);
+      const refC = strong.length >= 24 ? pct(strong, 0.9) : 0;
+      const sharp = []; for (let i = 0; i < nK; i++) if (refC > 0 && click[i] >= 0.6 * refC) sharp.push(K.s[i]);
+      if (refC >= 60 && sharp.length >= 16) {
+        refK = pct(sharp, 0.9); clicked = true;
+        for (let i = 0; i < nK; i++) {
+          const r = refK > 0 ? K.s[i] / refK : 0, g = Math.min(1, click[i] / (0.6 * refC));
+          kw[i] = r >= 0.3 ? Math.min(1, r * r) * g * g : 0;
+        }
+      }
+    }
     const refR = pct(S.s, 0.9);
     // withK: how much of a kick comes with this hit (0: none; 1: a full kick; between: a soft kick or a bass note)
     const body = new Float32Array(nS), air = new Float32Array(nS), withK = new Float32Array(nS);
@@ -182,7 +215,7 @@
     // running sums of the weights, for "how much of the drums is between two times"
     const cum = w => { const c = new Float64Array(w.length + 1); for (let i = 0; i < w.length; i++) c[i + 1] = c[i] + w[i]; return c; };
     return { Kt: K.t, Ks: K.s, kw, St: S.t, Ss: S.s, body, air, sw, hw, cumK: cum(kw), cumS: cum(sw), drums: Float64Array.from(drums),
-      allT: Float64Array.from(all.map(e => e[0])), allW: Float32Array.from(all.map(e => e[1])), kicks: kw.filter(v => v >= 0.36).length, snares: sw.filter(v => v > 0).length, hats: hw.filter(v => v > 0).length };
+      allT: Float64Array.from(all.map(e => e[0])), allW: Float32Array.from(all.map(e => e[1])), kicks: kw.filter(v => v >= 0.36).length, snares: sw.filter(v => v > 0).length, hats: hw.filter(v => v > 0).length, clicked };
   }
 
   // ---------- 2. the tempo, by explanation ----------
@@ -549,7 +582,7 @@
   // -> { pins, map, obs, P, row, on, rms, segs, live: true, doubt: [[k0, k1]], ev: e (beat -> its hits' time), sure }
   //    or null when the path can't be found from the known beat
   const LIVE_R = 250, LIVE_ALPHA = 400, LIVE_H = 8, LIVE_TOL = 0.004, LIVE_PRIOR = 0.25;
-  function liveOf(hits, ev, row, kS, tS, P, dur, w0, w1, prior) {
+  function liveOf(hits, ev, row, kS, tS, P, dur, w0, w1, prior, local) {
     const R = LIVE_R, N = Math.ceil(dur * R) + 1;
     // 1. the families
     // (the snares in two: the bright ones (a snare's noise, a rim, a clap) and the dark ones (a chord's skank, a tom):
@@ -579,8 +612,22 @@
     });
     // 2. the beat path; twice: the second time each family weighed by how much of it is on the first path's beats
     // over the whole track (the seed window alone may have no hats, or a fill)
-    const Pf = P * R, dLo = Math.floor(Pf * 0.92), dHi = Math.ceil(Pf * 1.08), pen = new Float64Array(dHi + 1);
-    for (let d = dLo; d <= dHi; d++) pen[d] = LIVE_ALPHA * Math.log(d / Pf) ** 2;
+    // (the step from one beat to the next costs by how far it is from the tempo there: where the windows read a tempo
+    // well apart from the track's mean (1.5 % or more: a band that speeds up for good near the end, a splice, a tape),
+    // their own reading, from one window's middle to the next, so the new tempo isn't paid for at every beat; else
+    // the mean)
+    const Pf = P * R, dLo = Math.floor(Pf * 0.92), dHi = Math.ceil(Pf * 1.08);
+    const PL = new Float32Array(N).fill(Pf);
+    if (local && local.length >= 2) {
+      const L = local.slice().sort((x, y) => x[0] - y[0]);
+      for (let i = 0; i < N; i++) {
+        const t = i / R; let q = 0; while (q + 1 < L.length && L[q + 1][0] <= t) q++;
+        const v = t <= L[0][0] ? L[0][1] : q + 1 >= L.length ? L[L.length - 1][1] : L[q][1] + (L[q + 1][1] - L[q][1]) * (t - L[q][0]) / (L[q + 1][0] - L[q][0]);
+        // (a band breathes by a percent or so, which the hits show well enough: only a change beyond that is taken)
+        if (Math.abs(Math.log(v / P)) >= 0.015) PL[i] = Math.max(dLo + 1, Math.min(dHi - 1, v * R));
+      }
+    }
+    const LG = new Float32Array(dHi + 1); for (let d = Math.max(1, dLo); d <= dHi; d++) LG[d] = Math.log(d);
     const O = new Float32Array(N), C = new Float64Array(N), B = new Int32Array(N), sg = 0.010 * R, rad = Math.ceil(3 * sg);
     const pathOf = fwu => {
       O.fill(0);
@@ -600,7 +647,8 @@
       }
       for (let i = 0; i < N; i++) {
         let best = 0, bj = -1;
-        for (let d = dLo; d <= dHi && i - d >= 0; d++) { const v = C[i - d] - pen[d]; if (v > best) { best = v; bj = i - d; } }
+        const lp = Math.log(PL[i]);
+        for (let d = dLo; d <= dHi && i - d >= 0; d++) { const v = C[i - d] - LIVE_ALPHA * (LG[d] - lp) ** 2; if (v > best) { best = v; bj = i - d; } }
         C[i] = O[i] + best; B[i] = bj;
       }
       let end = N - 1;
@@ -773,6 +821,17 @@
     const doubtK = [];
     // (two bars or more: a bar's fill or a missed kick is drawn across as well, and is not worth a look)
     for (let i = first; i <= last;) { if (have[i]) { i++; continue; } let e = i; while (e + 1 < nC && !have[e + 1]) e++; if (e - i + 1 >= 8) doubtK.push([kLo2 + i, kLo2 + e]); i = e + 1; }
+    // (but where the drums do play before the first sure beat or after the last, two bars or more of them, the grid
+    // there only goes on at the tempo next to it: doubtful too. An outro whose kicks are softer than the rest, the
+    // band slowing for the end, is not a place to trust a straight line)
+    { const played = j => byJ[j].some(o => o.r > 0) || byJ[j].length >= 2;
+      let jF = 0; while (jF < nK && !sure[jF]) jF++;
+      let jL = nK - 1; while (jL >= 0 && !sure[jL]) jL--;
+      let a = -1; for (let j = 0; j < jF; j++) if (played(j)) { a = j; break; }
+      if (a >= 0) { let c = 0; for (let j = a; j < jF; j++) if (played(j)) c++; if (jF - a >= 8 && c >= 4) doubtK.unshift([kOf[0], kOf[jF] - 1]); }
+      let b = -1; for (let j = nK - 1; j > jL; j--) if (played(j)) { b = j; break; }
+      if (b >= 0) { let c = 0; for (let j = jL + 1; j <= b; j++) if (played(j)) c++; if (b - jL >= 8 && c >= 4) doubtK.push([kOf[jL] + 1, kOf[nK - 1]]); }
+    }
     // the evidence itself, beat by beat: its kick (the beat's own family; the weighted middle when there are more), to
     // judge grids by. The others' lags are estimates; the kick is where the beat is
     const evid = new Map();
@@ -829,29 +888,53 @@
   function analyzeGrid(peaks, hits, opts = {}) {
     if (!hits || !hits.data || hits.rate !== HIT_RATE || !peaks || !peaks.data || hits.n < 8 * HIT_RATE) return null;
     const dur = hits.n / HIT_RATE, none = code => ({ v: GRID_V, bpm: null, ok: false, why: [{ code }], notes: [], sections: [] });
-    const ev = findEvents(hits, peaks);
-    if (ev.drums.length < 24) return none(opts.debug ? 'none:drums' : 'none');
-
     // -- 2. the windows' readings, added up by tempo
-    const wins = [];
-    for (let t0 = 0; t0 < Math.max(1, dur - WIN / 2); t0 += HOP) { const r = readWindow(ev, t0, Math.min(dur, t0 + WIN)); if (r) wins.push(r); }
-    if (!wins.length) return none(opts.debug ? 'none:windows' : 'none');
-    const clusters = [];
-    let wAll = 0;
-    for (const w of wins) {
-      wAll += w[0].w;
-      for (const c of w) {
-        let cl = clusters.find(x => Math.abs(Math.log(c.bpm / x.bpm)) < 0.012);
-        if (!cl) { cl = { bpm: c.bpm, sum: 0, wsum: 0, cK: 0, c: 0, alt: 0, list: [] }; clusters.push(cl); }
-        cl.bpm = (cl.bpm * cl.wsum + c.bpm * c.w) / (cl.wsum + c.w);
-        cl.sum += c.score * c.w; cl.cK += c.cK * c.w; cl.c += c.c * c.w; cl.alt += c.alt * c.w; cl.wsum += c.w; cl.list.push(c);
+    const readAll = (ev, lenient) => {
+      if (ev.drums.length < 24) return { none: 'drums' };
+      const wins = [];
+      for (let t0 = 0; t0 < Math.max(1, dur - WIN / 2); t0 += HOP) { const r = readWindow(ev, t0, Math.min(dur, t0 + WIN)); if (r) wins.push(r); }
+      if (!wins.length) return { none: 'windows' };
+      const clusters = [];
+      let wAll = 0;
+      for (const w of wins) {
+        wAll += w[0].w;
+        for (const c of w) {
+          let cl = clusters.find(x => Math.abs(Math.log(c.bpm / x.bpm)) < 0.012);
+          if (!cl) { cl = { bpm: c.bpm, sum: 0, wsum: 0, cK: 0, c: 0, alt: 0, list: [] }; clusters.push(cl); }
+          cl.bpm = (cl.bpm * cl.wsum + c.bpm * c.w) / (cl.wsum + c.w);
+          cl.sum += c.score * c.w; cl.cK += c.cK * c.w; cl.c += c.c * c.w; cl.alt += c.alt * c.w; cl.wsum += c.w; cl.list.push(c);
+        }
       }
+      for (const cl of clusters) { cl.agg = cl.sum / wAll; cl.cK /= cl.wsum; cl.c /= cl.wsum; cl.alt /= cl.wsum; }
+      clusters.sort((x, y) => y.agg - x.agg);
+      if (clusters[0].agg > 0.12) return { wins, clusters };
+      // (lenient: sparse drums, a dub's, explain too little of what plays to score well anywhere; but where window after
+      // window, through most of the track, reads the same tempo (or its double, its half) as its best, that is a steady
+      // beat all the same: its cluster, said to be faint. A track with no drums reads too few windows for it)
+      if (lenient && wins.length >= 10) {
+        const bests = wins.map(w => w.reduce((x, y) => (y.score > x.score ? y : x)));
+        let fam = null;
+        for (const b of bests) { const n = bests.filter(c => [1, 2, 0.5].some(f => Math.abs(Math.log(c.bpm / (b.bpm * f))) < 0.015)).length; if (!fam || n > fam.n) fam = { bpm: b.bpm, n }; }
+        if (fam.n >= 0.65 * bests.length) {
+          const inFam = clusters.filter(cl => [1, 2, 0.5].some(f => Math.abs(Math.log(cl.bpm / (fam.bpm * f))) < 0.015));
+          if (inFam.length && inFam[0].agg >= 0.06) { const i = clusters.indexOf(inFam[0]); clusters.splice(i, 1); clusters.unshift(inFam[0]); return { wins, clusters, faint: true }; }
+        }
+      }
+      return { none: 'score ' + clusters[0].agg };
+    };
+    let ev = findEvents(hits, peaks), rd = readAll(ev), bassy = false;
+    // (no steady beat: once more with the low hits counted by their beater's click, a busy bass's notes not taken for
+    // kicks. A track with no drums at all stays without)
+    if (rd.none) {
+      const ev2 = findEvents(hits, peaks, { click: true });
+      if (ev2.clicked) { const rd2 = readAll(ev2, true); if (!rd2.none) { ev = ev2; rd = rd2; bassy = true; } }
+      if (rd.none) { const rd3 = readAll(ev, true); if (!rd3.none) rd = rd3; }
     }
-    for (const cl of clusters) { cl.agg = cl.sum / wAll; cl.cK /= cl.wsum; cl.c /= cl.wsum; cl.alt /= cl.wsum; }
-    clusters.sort((x, y) => y.agg - x.agg);
+    if (rd.none) return none(opts.debug ? 'none:' + rd.none : 'none');
+    const { wins, clusters } = rd;
     let pick = clusters[0];
-    if (!(pick.agg > 0.12)) return none(opts.debug ? 'none:score ' + pick.agg : 'none');
     const notes = [], why = [];
+    if (bassy) notes.push({ code: 'bassy' });
     const partner = f => clusters.find(x => Math.abs(Math.log(x.bpm / (pick.bpm * f))) < 0.012);
     // (the first convention: a drum on every beat is the beat, even when an offbeat stab makes the double look
     // like kick, snare, kick, snare)
@@ -996,7 +1079,14 @@
       // (from the seed window's own grid, right there to a few ms: a kick beat, numbered 0 as the line's beats are)
       // (each window's own grid, where it reads this tempo well: in our beats, a half-time reading counted double)
       const mul = Pp / P, prior = pick.list.filter(c => c.score >= 0.3 * seed.score).map(c => [c.t0, c.t1, c.a + c.even * c.P, c.P / mul]);
-      const lv = liveOf(hits, ev, L.row, 0, a, P, dur, seed.t0, seed.t1, prior);
+      // (each window's own tempo, near this one: its best reading within 8 %, where it reads one well)
+      const local = [];
+      for (const w of wins) {
+        let b = null;
+        for (const c of w) { const Pc = c.P / mul; if (Math.abs(Math.log(Pc / P)) < 0.075 && (!b || c.score > b.score)) b = { ...c, Pc }; }
+        if (b && b.score >= 0.3 * seed.score) local.push([(b.t0 + b.t1) / 2, b.Pc]);
+      }
+      const lv = liveOf(hits, ev, L.row, 0, a, P, dur, seed.t0, seed.t1, prior, local);
       if (lv) {
         // (where the drums give too little to follow: said whichever grid is kept, a band's or stage 5's)
         if (lv.doubt.length) liveDoubt = lv.doubt.map(([a0, b0]) => ({ t0: lv.map.timeAt(a0), t1: lv.map.timeAt(b0), why: 'drums' }));
@@ -1041,6 +1131,7 @@
     const t0 = bar0 - Math.floor(bar0 / period) * period;
 
     // -- 7. trust
+    if (rd.faint) why.push({ code: 'faint' });
     if (margin < 1.15 && second) why.push({ code: 'tempo2', bpm: Math.round(second.bpm * 10) / 10 });
     if (voters >= 3 && agree / voters < 0.6) {
       const names = ['start', 'middle', 'end'];
@@ -1442,6 +1533,8 @@
       case 'long': return 'too long for a beat grid (over 3 hours)';
       case 'tempo2': return `the tempo could also be ${r.bpm} BPM`;
       case 'parts': return r.odd && r.odd.length ? `its parts read different tempos (the ${r.odd.map(o => `${o.part}: ${o.bpm}`).join(', the ')})` : 'its parts read different tempos';
+      case 'bassy': return 'its bass\'s notes are as sharp as kicks: the kicks told by their click';
+      case 'faint': return 'the drums are sparse: the tempo is read from most of the track agreeing, not from a clear beat';
       case 'few': return `only ${r.n || 'a few'} beats have a hit to place the grid on`;
       case 'loose': return `its hits sit loosely on the grid (${r.ms} ms; ${r.on} % on it)`;
       case 'drift': return `the tempo is not constant${r.parts && r.parts[0] && r.parts[2] ? ` (${r.parts[0]} BPM at the start, ${r.parts[2]} at the end)` : ''}${r.at != null ? `: the grid holds only to about ${mmss(r.at)}` : ''}`;

@@ -29,6 +29,17 @@
 //      line. Where that falls under half of what the best window has, the line doesn't hold (the tempo
 //      drifts, two takes at two speeds, the grid slips once): said, with the tempo of the start, the middle
 //      and the end.
+//   4b. A tempo that wanders (stage 5). Where the line doesn't hold, the beats are followed out from the seed
+//      window kick by kick (across a breakdown found again from the next steady run of kicks; a slip, or the tempo
+//      changing, from three kicks on a new line), and the fewest pins that hold them within 2 ms are placed: the
+//      grid is those pins, the 1 and the sections are found on it. When the beats followed all sit on the straight
+//      line after all, the tempo is constant: the line, unmarked.
+//   4c. A band's tempo (stage 6a). Where the line doesn't hold tightly, the beat is followed through all the drums
+//      (kicks, snares, rims, skanks, hats, each by how regular it is and how much of it is on the beat): the best
+//      beat path through the whole track, then a smooth curve through every hit near its beats (each instrument's
+//      own lag behind the kick taken off), then the fewest pins that keep the curve within 4 ms. Where the drums give
+//      too little (a dub's drop, the kicks out), the grid is drawn straight across and the stretch is doubtful
+//      (`doubt`). Taken only when it sits clearly better on the drums than the line or stage 5's pins.
 //   5. The whole-number lock. Music made on a computer is at a whole BPM, sometimes a half: when the fitted
 //      tempo is within a hair of one (the grid would not move by more than a millisecond anywhere), it is
 //      that one, exactly. Otherwise the tempo is kept as measured and noted as unusual (a vinyl rip, a band).
@@ -46,14 +57,15 @@
 //   half BPM), ok, why: [{ code, ... }], notes: [{ code, ... }], conf: { ... }, drift, parts,
 //   sections: [{ t, k, c }] (k: intro, kicks, main, break, drop, outro; c: how clear the change is, 0 to 1),
 //   cue: { t, ok, why: [codes], alts: [t], low } (the cue by the user's rule; alts: the other places when unsure),
-//   phrase: { o, conf } }
+//   phrase: { o, conf }, pins: [[t, b]] (a tempo that wanders: the grid's pins, b counted from the 1),
+//   doubt: [{ t0, t1, why }] (stage 6a: the stretches a band's grid is drawn across without the drums to follow) }
 // or { v, bpm: null, ok: false, why: [{ code: 'none' }] } when no steady beat is found.
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) module.exports = factory();
   else root.GridAnalysisCore = factory();
 })(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
-  const GRID_V = 4;                        // the method's number: another, and every automatic grid is worked out again
+  const GRID_V = 6;                        // the method's number: another, and every automatic grid is worked out again
   const HIT_RATE = 1000, PK_RATE = 150;
   const ROW_SHIFT = [0.0033, 0.0020];      // (as waveview.js: the rows' rise starts a little before the sound)
   const TOL = 0.015;                       // a hit within 15 ms of a beat is on it
@@ -169,7 +181,7 @@
     drums.sort((a, b) => a - b); all.sort((a, b) => a[0] - b[0]);
     // running sums of the weights, for "how much of the drums is between two times"
     const cum = w => { const c = new Float64Array(w.length + 1); for (let i = 0; i < w.length; i++) c[i + 1] = c[i] + w[i]; return c; };
-    return { Kt: K.t, Ks: K.s, kw, St: S.t, Ss: S.s, body, sw, hw, cumK: cum(kw), cumS: cum(sw), drums: Float64Array.from(drums),
+    return { Kt: K.t, Ks: K.s, kw, St: S.t, Ss: S.s, body, air, sw, hw, cumK: cum(kw), cumS: cum(sw), drums: Float64Array.from(drums),
       allT: Float64Array.from(all.map(e => e[0])), allW: Float32Array.from(all.map(e => e[1])), kicks: kw.filter(v => v >= 0.36).length, snares: sw.filter(v => v > 0).length, hats: hw.filter(v => v > 0).length };
   }
 
@@ -321,6 +333,499 @@
   const kSeedOf = (icpt, period, w) => Math.round(((w.t0 + w.t1) / 2 - icpt) / period);
 
   // ---------- the whole analysis ----------
+  // ---------- 4b. a tempo that wanders: the beats followed one by one, and the pins that hold them (stage 5) ----------
+  // A grid of pins, as waveview.js lays it (pinGrid): beat k at T, between two pins the beats spread evenly, before
+  // the first and after the last one beat every P. pins: [[t, k]] in order.
+  function beatMap(pins, P) {
+    const T = pins.map(p => p[0]), K = pins.map(p => p[1]), last = T.length - 1;
+    const seg = (A, x) => { let lo = 0, hi = A.length; while (lo < hi) { const m = (lo + hi) >> 1; if (A[m] <= x) lo = m + 1; else hi = m; } return lo - 1; };
+    const per = i => (i < 0 || i >= last ? P : (T[i + 1] - T[i]) / (K[i + 1] - K[i]));
+    return {
+      beatAt: t => { const i = seg(T, t), j = Math.max(0, i); return K[j] + (t - T[j]) / per(i); },
+      timeAt: k => { const i = seg(K, k), j = Math.max(0, i); return T[j] + (k - K[j]) * per(i); },
+    };
+  }
+  // The beats followed out from one known beat (k0 at t0, about P apart), both ways, on the kicks (the strong hits
+  // of the low end: a percussion's or a bass's hit is not taken for a beat), each kick's time taken on the row of
+  // the hits the exact grid uses (hitStart, the same rule: under a loud bass the low end's own rise comes late).
+  // Each next beat is looked for where the last few say it comes (a straight line through the last 8 found: a
+  // tempo that bends is followed closely); a kick within 4 ms of that is its beat.
+  // - A short passage without kicks is crossed at the tempo it had, the search widening with the gap.
+  // - Across a breakdown (12 beats or more without kicks), the beats are found again from the kicks themselves: the
+  //   first steady run of them (5 or more on the beats of 8 or more, on one straight line), and the beats across
+  //   the gap counted at the tempo of before and after, halfway (the tempo may have changed in the gap); a run that
+  //   falls between two beats so counted is not taken.
+  // - Three kicks off the line, on one straight line of their own: a slip (a bad edit, a record skipping: the same
+  //   tempo, the beats moved) or the tempo changing (kicks too far apart to follow it beat by beat). The line starts
+  //   again from them, and the beats back to the last one found are looked for on it.
+  // -> Map beat -> its kick's time
+  function trackBeats(hits, row, ev, k0, t0, P, kLo, kHi, dur) {
+    const found = new Map([[k0, t0]]), W = 8, ACC = 0.004, LONG = 12;
+    // (strong against the low hits around it, within 8 s: under a loud bass a kick's rise is smaller, and so is
+    // everything else's there)
+    const KT = ev.Kt, KS = ev.Ks, keep = [];
+    for (let j = 0, a = 0, b = 0; j < KT.length; j++) {
+      while (KT[a] < KT[j] - 8) a++;
+      while (b < KT.length && KT[b] <= KT[j] + 8) b++;
+      const loc = Array.from(KS.subarray(a, b)).sort((x, y) => x - y), ref = loc[Math.floor(0.9 * (loc.length - 1))];
+      if (KS[j] >= 0.6 * ref) keep.push(KT[j]);
+    }
+    const kicks = Float64Array.from(keep);
+    // (a kick near t, within win: its time on the row; none when the row has no hit there)
+    const kickNear = (t, win) => { const i = near(kicks, t, win + 0.004); if (i < 0) return null; const r = hitStart(hits, kicks[i], row, 0.012); return r != null && Math.abs(r - t) <= win ? r : null; };
+    const fitOf = hist => {
+      const last = hist[hist.length - 1];
+      if (hist.length < 3) return { sl: P, at: k => last[1] + (k - last[0]) * P };
+      let sk = 0, st = 0, skk = 0, skt = 0;
+      for (const [a, b] of hist) { sk += a; st += b; skk += a * a; skt += a * b; }
+      const m = hist.length, den = m * skk - sk * sk;
+      if (!(den > 0)) return { sl: P, at: k => last[1] + (k - last[0]) * P };
+      const sl = Math.max(P * 0.97, Math.min(P * 1.03, (m * skt - sk * st) / den));
+      return { sl, at: k => st / m + sl * (k - sk / m) };
+    };
+    // the steady runs of kicks from time `from` on (dir: forward, or back from it), starting within 8 beats of the
+    // first kick there: [{ pts: [[j, t]] (j beats from its first kick, the way it goes), P2: its tempo, tA }]
+    const runsFrom = (from, dir) => {
+      const out = [];
+      let i = dir > 0 ? lower(kicks, from) : lower(kicks, from) - 1;
+      const first = i >= 0 && i < kicks.length ? kicks[i] : null;
+      for (let tries = 0; tries < 24 && i >= 0 && i < kicks.length && Math.abs(kicks[i] - first) <= 8 * P; tries++, i += dir) {
+        const tA = kicks[i], pts = [];
+        for (let j = i; j >= 0 && j < kicks.length && Math.abs(kicks[j] - tA) <= 32 * P; j += dir) {
+          const q = Math.round(Math.abs(kicks[j] - tA) / P);
+          if (Math.abs(Math.abs(kicks[j] - tA) - q * P) <= 0.03 && (!pts.length || q > pts[pts.length - 1][0])) pts.push([q, kicks[j]]);
+        }
+        if (pts.length < 5 || pts[pts.length - 1][0] < 8) continue;
+        let use = pts, f = null;
+        for (let r = 0; r < 3; r++) {
+          let sk = 0, st = 0, skk = 0, skt = 0;
+          for (const [a, b] of use) { sk += a; st += b; skk += a * a; skt += a * b; }
+          const m = use.length, sl = (m * skt - sk * st) / (m * skk - sk * sk);
+          f = { sl: Math.abs(sl), at: q => st / m + sl * (q - sk / m) };
+          use = pts.filter(([q, t]) => Math.abs(t - f.at(q)) <= ACC);
+          if (use.length < 5) break;
+        }
+        if (use.length >= 5 && Math.abs(f.sl / P - 1) <= 0.03) out.push({ pts: use, P2: f.sl, tA: f.at(0) });
+      }
+      return out;
+    };
+    for (const dir of [1, -1]) {
+      let hist = [[k0, t0]], pend = [], lastK = k0;
+      for (let k = k0 + dir; dir > 0 ? k <= kHi : k >= kLo; k += dir) {
+        const fit = fitOf(hist), pred = fit.at(k), gap = Math.abs(k - lastK);
+        if (pred < -P || pred > dur + P) continue;
+        const last = hist[hist.length - 1];
+        const lo = Math.min(last[1], pred) + 0.5 * P, hi = Math.max(last[1], pred) - 0.5 * P;
+        const brk = gap >= LONG && lower(kicks, hi) - lower(kicks, lo) <= 1;
+        if (brk) {
+          // (a breakdown crossed: found again from the next steady run of kicks, if there is one near)
+          const n1 = dir > 0 ? lower(kicks, pred - 0.5 * P) : lower(kicks, pred + 0.5 * P) - 1;
+          if (n1 < 0 || n1 >= kicks.length || Math.abs(kicks[n1] - pred) > 0.5 * P) continue;
+          // (of the runs there, the one that falls nearest a beat so counted: a run a sixteenth off, a bass's or a
+          // pickup's, is not the beat)
+          let run = null, x = 0, n = 0;
+          for (const r of runsFrom(pred - dir * 0.5 * P, dir)) {
+            const xr = Math.abs(r.tA - last[1]) / ((fit.sl + r.P2) / 2);
+            if (!run || Math.abs(xr - Math.round(xr)) < Math.abs(x - n)) { run = r; x = xr; n = Math.round(xr); }
+          }
+          if (!run || Math.abs(x - n) > 0.3) continue;
+          const kA = last[0] + dir * n;
+          hist = [];
+          for (const [q, t0] of run.pts) { const kk = kA + dir * q, t = hitStart(hits, t0, row, 0.012); if (t == null) continue; found.set(kk, t); hist.push([kk, t]); }
+          if (!hist.length) { hist = [last]; continue; }
+          hist = hist.slice(-W);
+          lastK = hist[hist.length - 1][0]; k = lastK; pend = [];
+          continue;
+        }
+        const win = Math.min(0.03, 0.006 + 0.0012 * gap + (hist.length < 4 ? 0.014 : 0));
+        const t = kickNear(pred, win);
+        if (t != null && Math.abs(t - pred) <= (hist.length < 4 ? win : ACC)) {
+          hist.push([k, t]); if (hist.length > W) hist.shift();
+          found.set(k, t); pend = []; lastK = k;
+          continue;
+        }
+        // (off the line: a slip's first kicks, perhaps, looked for further out; not across a breakdown, where the
+        // beats are found again as above)
+        const w2 = Math.min(0.06, 0.15 * P), t2 = kickNear(pred, w2);
+        if (t2 == null) continue;
+        pend.push([k, t2, t2 - pred]);
+        if (pend.length < 3) continue;
+        const nf = fitOf(pend.map(x => [x[0], x[1]]));
+        if (pend.some(x => Math.abs(x[1] - nf.at(x[0])) > 0.0015) || Math.abs(nf.sl / P - 1) > 0.02) { pend.shift(); continue; }
+        const es = pend.map(x => x[2]), same = Math.max(...es) - Math.min(...es) < 0.003;
+        const at = same ? (kk => pend[0][1] + (kk - pend[0][0]) * fit.sl) : nf.at;
+        // (only when the kicks after them go on on the new line, and not on the old one: a pattern with some kicks
+        // played late, a shuffle, is not a slip; at the track's end, with no kicks after, they are taken)
+        let nNew = 0, nOld = 0;
+        for (let j = 1; j <= 12; j++) { const kk = k + dir * j; if (kickNear(at(kk), ACC) != null) nNew++; if (kickNear(fit.at(kk), ACC) != null) nOld++; }
+        if (nOld * 3 > nNew || (nNew < 2 && nOld > 0)) { pend.shift(); continue; }   // (none either way: the track's end)
+        for (const x of pend) found.set(x[0], x[1]);
+        for (let kk = pend[0][0] - dir; dir > 0 ? kk > lastK : kk < lastK; kk -= dir) {
+          const p2 = at(kk), t3 = kickNear(p2, ACC);
+          if (t3 != null) found.set(kk, t3);
+        }
+        hist = pend.map(x => [x[0], x[1]]);
+        lastK = k; pend = [];
+      }
+    }
+    return found;
+  }
+  // The fewest pins that hold the beats followed (obs: [[k, t]] in order) within `tol`: stretches grown one beat at a
+  // time while one straight line holds all their hits; where two stretches meet, a pin on the bar line where their
+  // lines cross (the tempo changing), or two pins a beat apart where the lines are parallel and apart (a slip).
+  // The first pin on the first bar line in the track, the last on the last: the tempo at each end goes on to the end.
+  // -> { pins: [[t, k]], segs }
+  function pinsOf(obs, tol, dur) {
+    const lineOf = (s, e) => {
+      let sk = 0, st = 0, skk = 0, skt = 0; const m = e - s + 1;
+      for (let i = s; i <= e; i++) { const [k, t] = obs[i]; sk += k; st += t; skk += k * k; skt += k * t; }
+      const den = m * skk - sk * sk, sl = den > 0 ? (m * skt - sk * st) / den : 0;
+      return { sl, ic: (st - sl * sk) / m, at: k => (st - sl * sk) / m + sl * k };
+    };
+    const holds = (s, e, f) => { for (let i = s; i <= e; i++) if (Math.abs(obs[i][1] - f.at(obs[i][0])) > tol) return false; return true; };
+    const segs = [];
+    for (let s = 0; s < obs.length;) {
+      let e = Math.min(obs.length - 1, s + 1), f = lineOf(s, e);
+      for (let j = e + 1; j < obs.length; j++) { const g = lineOf(s, j); if (!holds(s, j, g)) break; e = j; f = g; }
+      segs.push({ s, e, f, k0: obs[s][0], k1: obs[e][0] });
+      s = e + 1;
+    }
+    const pins = [];
+    const put = (t, k) => { if (!pins.length || (k > pins[pins.length - 1][1] && t > pins[pins.length - 1][0] + 1e-4)) pins.push([t, k]); };
+    const A = segs[0], Z = segs[segs.length - 1];
+    // (the first bar line in the track, on the first stretch's line)
+    const kStart = 4 * Math.ceil((-A.f.ic / A.f.sl) / 4 - 1e-9);
+    put(A.f.at(kStart), kStart);
+    for (let i = 0; i + 1 < segs.length; i++) {
+      const a = segs[i], b = segs[i + 1];
+      // where the two lines cross, kept between the last beat of one and the first of the next (a bar either side)
+      const kx = Math.abs(a.f.sl - b.f.sl) > 1e-9 ? (b.f.ic - a.f.ic) / (a.f.sl - b.f.sl) : (a.k1 + b.k0) / 2;
+      const kc = Math.max(a.k1 - 4, Math.min(b.k0 + 4, kx));
+      const kb = 4 * Math.round(kc / 4);
+      if (Math.abs(a.f.at(kb) - b.f.at(kb)) <= tol) put((a.f.at(kb) + b.f.at(kb)) / 2, kb);
+      else { put(a.f.at(a.k1), a.k1); put(b.f.at(b.k0), b.k0); }
+    }
+    const kEnd = 4 * Math.floor(((dur - Z.f.ic) / Z.f.sl) / 4 + 1e-9);
+    put(Z.f.at(kEnd), kEnd);
+    return { pins, segs };
+  }
+  // Follow the beats from one known beat and pin them. -> { pins, map, obs, P } or
+  // null when they can't be followed over most of the drums (then the track stays marked as drifting)
+  function bendOf(hits, row, ev, k0, t0, P, kLo, kHi, dur) {
+    const f = trackBeats(hits, row, ev, k0, t0, P, kLo, kHi, dur);
+    const obs = [...f.entries()].sort((x, y) => x[0] - y[0]);
+    if (obs.length < 32) return null;
+    // (followed over most of the track where the drums play: the first and last drums within a few bars of the hits)
+    const d0 = ev.drums[0], d1 = ev.drums[ev.drums.length - 1], span = obs[obs.length - 1][1] - obs[0][1];
+    if (span < 0.6 * (d1 - d0)) return null;
+    const { pins, segs } = pinsOf(obs, 0.002, dur);
+    if (pins.length < 2) return null;
+    const Pm = (pins[pins.length - 1][0] - pins[0][0]) / (pins[pins.length - 1][1] - pins[0][1]);
+    const map = beatMap(pins, Pm);
+    let on = 0, ss = 0;
+    for (const [k, t] of obs) { const e = t - map.timeAt(k); if (Math.abs(e) <= 0.003) on++; ss += e * e; }
+    if (on < 0.9 * obs.length) return null;
+    return { pins, map, obs, P: Pm, row, on: on / obs.length, rms: Math.sqrt(ss / obs.length) * 1000, segs: segs.length };
+  }
+
+  // ---------- 4c. a band's tempo (stage 6a): every drum, the best beat path, a smooth curve, the fewest pins ----------
+  // Music played by a band breathes: its tempo moves a little all the time, and its drummer's hits are each a few ms
+  // off the beat. Stage 5 follows kicks one by one and looks for slips; a one-drop has a kick a bar, and a band's beat
+  // is in all of its drums. So, from one known beat (the line's, near its seed window):
+  //   1. the families: kicks (on the grid's row, as the line), softer low hits (a bass's notes), bright snares (a
+  //      snare, a rim, a clap), dark ones (a skank, a tom), hats; each weighed by
+  //      how regular it is in the track (how many of its hits have another one beat or two beats later), so a busy
+  //      percussion counts for little;
+  //   2. the best beat path through the whole track (dynamic programming, in the manner of Ellis 2007): every frame's
+  //      best score is its drums plus the best of the beats a period before it, less a cost for a beat interval
+  //      away from the period. A breakdown has no drums: the path crosses it at the tempo of the two sides;
+  //   3. every hit near a beat of the path is that beat's, and the beat's time is a smooth curve through them (a local
+  //      straight line over 8 beats either side, weighted, and twice again with the hits far off it counting less):
+  //      a drummer's few ms either way average out; a snare or a skank played behind the beat on purpose is moved
+  //      by its own family's lag (the kick is the beat);
+  //   4. where the hits are too few (the drums out: a dub's drop), the curve is drawn straight across from the two
+  //      sides and the stretch is doubtful;
+  //   5. the fewest pins (on every 4th beat) whose straight stretches keep the curve within 4 ms.
+  // -> { pins, map, obs, P, row, on, rms, segs, live: true, doubt: [[k0, k1]], ev: e (beat -> its hits' time), sure }
+  //    or null when the path can't be found from the known beat
+  const LIVE_R = 250, LIVE_ALPHA = 400, LIVE_H = 8, LIVE_TOL = 0.004, LIVE_PRIOR = 0.25;
+  function liveOf(hits, ev, row, kS, tS, P, dur, w0, w1, prior) {
+    const R = LIVE_R, N = Math.ceil(dur * R) + 1;
+    // 1. the families
+    // (the snares in two: the bright ones (a snare's noise, a rim, a clap) and the dark ones (a chord's skank, a tom):
+    // two players, each with a lag of their own)
+    // (and the low hits in two: the kicks, the beat itself, and the softer ones: a bass's notes, a kick played softly,
+    // late or early in their own way)
+    const NF = 5, fam = [[], [], [], [], []];
+    for (let i = 0; i < ev.Kt.length; i++) if (ev.kw[i] >= 0.3) { const t = hitStart(hits, ev.Kt[i], row, 0.012); fam[ev.kw[i] >= 0.5 ? 0 : 4].push([t != null ? t : ev.Kt[i], ev.kw[i]]); }
+    // (a hit of the upper row with a kick is timed by the kick's own click: the kick's, not the snare's or the skank's)
+    const KT0 = Float64Array.from(fam[0].map(x => x[0]).sort((x, y) => x - y));
+    for (let i = 0; i < ev.St.length; i++) {
+      if (near(KT0, ev.St[i], 0.012) >= 0) continue;
+      if (ev.sw[i] >= 0.3) fam[ev.air[i] >= 0.6 * ev.body[i] ? 1 : 2].push([ev.St[i], ev.sw[i]]); else if (ev.hw[i] > 0.02) fam[3].push([ev.St[i], ev.hw[i]]);
+    }
+    // (and how much of it is on the beats where they are known, the seed window: hats on the offbeats keep time
+    // too, but they are not the beat, and a path through them would be half a beat off)
+    const fw = fam.map(F => {
+      if (F.length < 16) return 0;
+      const T = Float64Array.from(F.map(x => x[0])), ref = pct(F.map(x => x[1]), 0.9) || 1;
+      let on = 0, all = 0, bOn = 0, bAll = 0;
+      for (const [t, w] of F) {
+        all += w; if ([1, 2, 4].some(m => near(T, t + m * P, 0.012 + 0.006 * m) >= 0)) on += w;
+        if (t >= w0 && t <= w1) { const u = (t - tS) / P; bAll += w; if (Math.abs(u - Math.round(u)) * P <= Math.min(0.025, 0.12 * P)) bOn += w; }
+      }
+      for (const x of F) x[1] = Math.min(1, x[1] / ref);
+      return (all > 0 ? on / all : 0) * (bAll > 0 ? bOn / bAll : 0);
+    });
+    // 2. the beat path; twice: the second time each family weighed by how much of it is on the first path's beats
+    // over the whole track (the seed window alone may have no hats, or a fill)
+    const Pf = P * R, dLo = Math.floor(Pf * 0.92), dHi = Math.ceil(Pf * 1.08), pen = new Float64Array(dHi + 1);
+    for (let d = dLo; d <= dHi; d++) pen[d] = LIVE_ALPHA * Math.log(d / Pf) ** 2;
+    const O = new Float32Array(N), C = new Float64Array(N), B = new Int32Array(N), sg = 0.010 * R, rad = Math.ceil(3 * sg);
+    const pathOf = fwu => {
+      O.fill(0);
+      for (let f = 0; f < NF; f++) if (fwu[f] > 0) for (const [t, w] of fam[f]) {
+        const c = t * R, i0 = Math.max(0, Math.floor(c - rad)), i1 = Math.min(N - 1, Math.ceil(c + rad));
+        for (let i = i0; i <= i1; i++) O[i] += fwu[f] * w * Math.exp(-0.5 * ((i - c) / sg) ** 2);
+      }
+      const pk = []; for (let i = 1; i + 1 < N; i++) if (O[i] > 0.05 && O[i] >= O[i - 1] && O[i] > O[i + 1]) pk.push(O[i]);
+      const ref = pct(pk, 0.8); if (!(ref > 0)) return null;
+      for (let i = 0; i < N; i++) O[i] /= ref;
+      // (and, softly, the beats each window of the tempo reading laid: where two paths explain the drums about as well,
+      // a bass line rolling on the offbeats as loud as the kicks, the one on the windows' beats. The path only says
+      // which beat each hit is; the curve is the hits' own)
+      for (const [t0, t1, a0, Pw] of prior) for (let k = Math.ceil((t0 - a0) / Pw); a0 + k * Pw <= t1; k++) {
+        const c = (a0 + k * Pw) * R, r2 = Math.ceil(3 * 0.02 * R);
+        for (let i = Math.max(0, Math.floor(c - r2)); i <= Math.min(N - 1, Math.ceil(c + r2)); i++) O[i] += LIVE_PRIOR * Math.exp(-0.5 * ((i - c) / (0.02 * R)) ** 2);
+      }
+      for (let i = 0; i < N; i++) {
+        let best = 0, bj = -1;
+        for (let d = dLo; d <= dHi && i - d >= 0; d++) { const v = C[i - d] - pen[d]; if (v > best) { best = v; bj = i - d; } }
+        C[i] = O[i] + best; B[i] = bj;
+      }
+      let end = N - 1;
+      for (let i = Math.max(0, N - dHi); i < N; i++) if (C[i] > C[end]) end = i;
+      const pa = [];
+      for (let i = end; i >= 0; i = B[i]) pa.push(i / R);
+      return pa.reverse();
+    };
+    let path = pathOf(fw);
+    if (!path || path.length < 32) return null;
+    {
+      const BT = Float64Array.from(path), fw2 = fam.map((F, f) => {
+        if (!fw[f] && F.length < 16) return 0;
+        let on = 0, all = 0;
+        for (const [t, w] of F) { if (t < path[0] || t > path[path.length - 1]) continue; all += w; if (near(BT, t, Math.min(0.025, 0.12 * P)) >= 0) on += w; }
+        const T = Float64Array.from(F.map(x => x[0]));
+        let rg = 0, ra = 0; for (const [t, w] of F) { ra += w; if ([1, 2, 4].some(m => near(T, t + m * P, 0.012 + 0.006 * m) >= 0)) rg += w; }
+        return (ra > 0 ? rg / ra : 0) * (all > 0 ? on / all : 0);
+      });
+      if (fw2.some((x, f) => Math.abs(x - fw[f]) > 0.05)) { for (let f = 0; f < NF; f++) fw[f] = fw2[f]; const p2 = pathOf(fw); if (p2 && p2.length >= 32) path = p2; }
+    }
+    // (numbered from the known beat: the path's beat nearest it is kS)
+    let j0 = 0;
+    for (let j = 1; j < path.length; j++) if (Math.abs(path[j] - tS) < Math.abs(path[j0] - tS)) j0 = j;
+    if (Math.abs(path[j0] - tS) > 0.25 * P) return null;
+    const kA = kS - j0, nK = path.length;
+    // 3. the hits of each beat
+    // (first by the path, within 40 ms; then again by the curve, closer: a hat a 16th before the beat is not the beat's)
+    let obs = [], byJ = null;
+    const assign = (BT, tol) => {
+      const prev = new Map(obs.map(o => [o.t * 10 + o.f, o.r]));
+      obs = [];
+      for (let f = 0; f < NF; f++) if (fw[f] > 0) for (const [t, w] of fam[f]) {
+        const j = near(BT, t, tol);
+        if (j >= 0) obs.push({ j, t, w: w * fw[f], f, r: prev.has(t * 10 + f) ? prev.get(t * 10 + f) : 1 });
+      }
+      byJ = Array.from({ length: nK }, () => []);
+      for (const o of obs) byJ[o.j].push(o);
+    };
+    assign(Float64Array.from(path), Math.min(0.04, 0.15 * P));
+    if (obs.length < 32) return null;
+    const off = new Array(NF).fill(0);
+    // the curve, over H beats either side; loo: each beat from its neighbours alone (to judge H by)
+    const smooth = (H, loo) => {
+      const S = new Float64Array(nK).fill(NaN), W = new Float64Array(nK);
+      for (let j = 0; j < nK; j++) {
+        let sw = 0, sx = 0, sy = 0, sxx = 0, sxy = 0, near2 = 0;
+        for (let q = Math.max(0, j - H); q <= Math.min(nK - 1, j + H); q++) {
+          if (loo && q === j) continue;
+          const u = Math.abs(q - j) / (H + 1), kw = (1 - u * u * u) ** 3;
+          for (const o of byJ[q]) {
+            const w = o.w * o.r * kw, y = o.t - off[o.f] - (path[0] + q * P), x = q - j;
+            sw += w; sx += w * x; sy += w * y; sxx += w * x * x; sxy += w * x * y;
+            if (Math.abs(q - j) <= 2) near2 += o.w * o.r;
+          }
+        }
+        W[j] = near2;
+        if (!(sw > 0)) continue;
+        const den = sw * sxx - sx * sx, b = den > 1e-9 ? (sw * sxy - sx * sy) / den : 0;
+        S[j] = path[0] + j * P + (sy - b * sx) / sw;
+      }
+      return { S, W };
+    };
+    const wmed = A => { if (!A.length) return 0; A.sort((x, y) => x[0] - y[0]); const tot = A.reduce((s, x) => s + x[1], 0); let c = 0; for (const [v, w] of A) { c += w; if (c >= tot / 2) return v; } return A[A.length - 1][0]; };
+    // (how far apart: the width that best tells each beat's hits from its neighbours', with the hits far off counting less)
+    const cvOf = H => { const L = smooth(H, true).S; let e = 0, n = 0; for (const o of obs) if (isFinite(L[o.j])) { const d = o.t - off[o.f] - L[o.j], w = o.w * o.r; e += w * Math.min(d * d, 0.0004); n += w; } return n ? e / n : 1; };
+    let H = LIVE_H, sm = smooth(H), refF = 0;
+    const nres = new Array(NF).fill(0);
+    for (let it = 0; it < 4; it++) {
+      // (each family's own lag behind the kicks (the beat, when there are enough of them), then the hits far off the
+      // curve counting less, then the width)
+      const res = fam.map(() => []);
+      for (const o of obs) if (isFinite(sm.S[o.j])) res[o.f].push([o.t - off[o.f] - sm.S[o.j], o.w * o.r]);
+      const tot = res.map(A => A.reduce((s, x) => s + x[1], 0));
+      refF = res[0].length >= 32 ? 0 : tot.indexOf(Math.max(...tot));
+      for (let f = 0; f < NF; f++) nres[f] = res[f].length;
+      const d = res.map(A => wmed(A.slice()));
+      for (let f = 0; f < NF; f++) off[f] += d[f] - d[refF];
+      const all = [];
+      for (const o of obs) if (isFinite(sm.S[o.j])) all.push([Math.abs(o.t - off[o.f] - sm.S[o.j]), o.w]);
+      const sc = Math.max(0.002, 1.4826 * wmed(all));
+      for (const o of obs) { const e = isFinite(sm.S[o.j]) ? (o.t - off[o.f] - sm.S[o.j]) / (4.685 * sc) : 0; o.r = Math.abs(e) < 1 ? (1 - e * e) ** 2 : 0; }
+      if (it === 1) { let bh = H, be = Infinity; for (const h of [4, 6, 8, 12, 16, 24]) { const e = cvOf(h); if (e < be) { be = e; bh = h; } } H = bh; }
+      sm = smooth(H);
+      if (it === 0 || it === 2) { const BT = Float64Array.from(sm.S, (x, j) => (isFinite(x) ? x : path[j] + off[0])); for (let j = 1; j < nK; j++) if (BT[j] <= BT[j - 1]) BT[j] = BT[j - 1] + 1e-6; assign(BT, Math.min(0.022, 0.08 * P)); sm = smooth(H); }
+    }
+    // 4. sure where the hits are enough, doubtful stretches (a bar or more) where they aren't: drawn straight across
+    // (enough: hits on 3 of the 5 beats around, weighing a quarter of what the beats usually have around them, or on 4
+    // of the 5 (hats alone): a few loose hits in a breakdown, a riser's notes, are not a beat to follow)
+    const sure = new Uint8Array(nK), wRef = pct(Array.from(sm.W).filter(x => x > 0), 0.5);
+    const has = j => byJ[j].some(o => o.r > 0);
+    // (and most of what the drums play there on the beats: in a breakdown, a pad's own movements, a reverb's tails fall
+    // anywhere, as many between the beats as on them)
+    // (per family: a fill's snares run through the 16ths while its kicks stay on the beat; a breakdown's loose hits are
+    // off the beat in every family. The best family with 3 hits or more says)
+    const FT = fam.map(F => Float64Array.from(F.map(x => x[0]).sort((x, y) => x - y))), tolOn = Math.min(0.025, 0.1 * P);
+    const onShare = j => {
+      const q0 = Math.max(0, j - 4), q1 = Math.min(nK - 1, j + 4), lo = path[q0] - 0.5 * P, hi = path[q1] + 0.5 * P;
+      let best = 0;
+      for (let f = 0; f < NF; f++) {
+        if (!(fw[f] > 0)) continue;
+        const T = FT[f], tot = lower(T, hi) - lower(T, lo);
+        if (tot < 3) continue;
+        let on = 0;
+        for (let q = q0; q <= q1; q++) if (isFinite(sm.S[q])) on += lower(T, sm.S[q] + tolOn) - lower(T, sm.S[q] - tolOn);
+        best = Math.max(best, on / tot);
+      }
+      return best;
+    };
+    // (and the beat's own family, the kicks, within 3 beats: where they are out, the others give the band's time but not
+    // quite its place, each instrument late or early in its own way, by up to 10-15 ms)
+    const refN = new Int32Array(nK + 1); for (let j = 0; j < nK; j++) refN[j + 1] = refN[j] + (byJ[j].some(o => o.f === refF && o.r > 0) ? 1 : 0);
+    const refNear = j => refN[Math.min(nK, j + 4)] - refN[Math.max(0, j - 3)] > 0;
+    for (let j = 0; j < nK; j++) { let c = 0; for (let q = Math.max(0, j - 2); q <= Math.min(nK - 1, j + 2); q++) if (has(q)) c++; if (isFinite(sm.S[j]) && c >= 3 && (sm.W[j] >= 0.25 * wRef || c >= 4) && onShare(j) >= 0.3 && refNear(j)) sure[j] = 1; }
+    const doubt = [];
+    for (let j = 0; j < nK;) { if (sure[j]) { j++; continue; } let e = j; while (e + 1 < nK && !sure[e + 1]) e++; if (e - j + 1 >= 4) doubt.push([j, e]); else for (let q = j; q <= e; q++) if (isFinite(sm.S[q])) sure[q] = 1; j = e + 1; }
+    // (a short stretch that looks sure in the middle of a doubtful one, a bass line on the offbeats in a dub's drop, is
+    // only trusted when it falls on the beats of the music nearest it, counted on at its tempo)
+    { const runs = []; for (let j = 0; j < nK;) { if (!sure[j]) { j++; continue; } let e = j; while (e + 1 < nK && sure[e + 1]) e++; runs.push([j, e]); j = e + 1; }
+      const loc = (a, b) => { let sk = 0, st = 0, skk = 0, skt = 0, m = 0; for (let q = a; q <= b; q++) if (sure[q]) { sk += q; st += sm.S[q]; skk += q * q; skt += q * sm.S[q]; m++; } const den = m * skk - sk * sk; return m >= 4 && den > 0 ? { sl: (m * skt - sk * st) / den, at: q => (st - (m * skt - sk * st) / den * sk) / m + (m * skt - sk * st) / den * q } : null; };
+      // (against the nearest long stretch, 32 beats or more, either side)
+      const solid = runs.filter(([a, b]) => b - a + 1 >= 32);
+      for (const [a, b] of runs) {
+        if (b - a + 1 >= 32 || !solid.length) continue;
+        const pa = solid.filter(r => r[1] < a).pop(), pb = solid.find(r => r[0] > b);
+        const L1 = pa ? loc(Math.max(pa[0], pa[1] - 11), pa[1]) : null, L2 = pb ? loc(pb[0], Math.min(pb[1], pb[0] + 11)) : null;
+        const tA = sm.S[a], tB = sm.S[b], gapL = pa ? tA - sm.S[pa[1]] : Infinity, gapR = pb ? sm.S[pb[0]] - tB : Infinity;
+        const L = gapL <= gapR ? L1 : L2, t = gapL <= gapR ? tA : tB;
+        if (!L) continue;
+        const u = (t - L.at(0)) / L.sl;
+        if (Math.abs(u - Math.round(u)) > 0.25) for (let q = a; q <= b; q++) sure[q] = 0;
+      }
+      doubt.length = 0;
+      for (let j = 0; j < nK;) { if (sure[j]) { j++; continue; } let e = j; while (e + 1 < nK && !sure[e + 1]) e++; if (e - j + 1 >= 4) doubt.push([j, e]); j = e + 1; }
+    }
+    const S = sm.S, js = []; for (let j = 0; j < nK; j++) if (sure[j]) js.push(j);
+    if (js.length < 32) return null;
+    // (across a doubtful stretch, how many beats: the path counts them at the track's mean tempo; the band's tempo on
+    // either side says better. Where the two disagree, the beats after it are numbered as the two sides say)
+    const kOf = new Int32Array(nK);
+    { const slope = (list) => { if (list.length < 4) return null; let sk = 0, st = 0, skk = 0, skt = 0; for (const j of list) { sk += j; st += S[j]; skk += j * j; skt += j * S[j]; } const m = list.length, den = m * skk - sk * sk; return den > 0 ? (m * skt - sk * st) / den : null; };
+      let shift = 0, di = 0;
+      for (let j = 0; j < nK; j++) {
+        while (di < doubt.length && doubt[di][1] + 1 < j) di++;
+        if (di < doubt.length && doubt[di][1] + 1 === j && doubt[di][0] > 0 && sure[doubt[di][0] - 1]) {
+          const ja = doubt[di][0] - 1, jb = j, before = [], after = [];
+          for (let q = ja; q >= 0 && before.length < 12 && ja - q < 24; q--) if (sure[q]) before.push(q);
+          for (let q = jb; q < nK && after.length < 12 && q - jb < 24; q++) if (sure[q]) after.push(q);
+          const p1 = slope(before), p2 = slope(after);
+          if (p1 && p2 && sure[jb]) { const x = (S[jb] - S[ja]) / ((p1 + p2) / 2), n = Math.round(x); if (Math.abs(x - n) < 0.3 && n > 0) shift += n - (jb - ja); }
+        }
+        kOf[j] = kA + j + shift;
+      }
+    }
+    const kLo2 = kOf[0], kHi2 = kOf[nK - 1], nC = kHi2 - kLo2 + 1, have = new Uint8Array(nC), cv = new Float64Array(nC);
+    for (const j of js) { have[kOf[j] - kLo2] = 1; cv[kOf[j] - kLo2] = S[j]; }
+    // (outside the sure beats, straight on: between two, across; before the first and after the last, at their tempo)
+    const idx = []; for (let i = 0; i < nC; i++) if (have[i]) idx.push(i);
+    const slopeAt = (from, dir) => { const pts = []; for (let i = from; pts.length < 8 && i >= 0 && i < idx.length; i += dir) pts.push(idx[i]); const a0 = pts[0], a1 = pts[pts.length - 1]; return a1 !== a0 ? (cv[a1] - cv[a0]) / (a1 - a0) : P; };
+    const first = idx[0], last = idx[idx.length - 1], s0 = slopeAt(0, 1), s1 = slopeAt(idx.length - 1, -1);
+    for (let i = 0, p = -1; i < nC; i++) {
+      if (have[i]) { p = i; continue; }
+      if (i < first) { cv[i] = cv[first] - (first - i) * s0; continue; }
+      if (i > last) { cv[i] = cv[last] + (i - last) * s1; continue; }
+      let n = i + 1; while (!have[n]) n++;
+      cv[i] = cv[p] + (cv[n] - cv[p]) * (i - p) / (n - p);
+    }
+    // (the doubtful stretches, on the beats so numbered: every run of two bars or more without a sure beat)
+    // (not before the first sure beat or after the last: the track's start and end, nothing playing to follow)
+    const doubtK = [];
+    // (two bars or more: a bar's fill or a missed kick is drawn across as well, and is not worth a look)
+    for (let i = first; i <= last;) { if (have[i]) { i++; continue; } let e = i; while (e + 1 < nC && !have[e + 1]) e++; if (e - i + 1 >= 8) doubtK.push([kLo2 + i, kLo2 + e]); i = e + 1; }
+    // the evidence itself, beat by beat: its kick (the beat's own family; the weighted middle when there are more), to
+    // judge grids by. The others' lags are estimates; the kick is where the beat is
+    const evid = new Map();
+    for (const j of js) {
+      if (!byJ[j].length) continue;
+      const A = byJ[j].filter(o => o.r > 0 && o.f === refF).map(o => [o.t - off[o.f], o.w * o.r]).sort((x, y) => x[0] - y[0]);
+      const tot = A.reduce((s, x) => s + x[1], 0); if (!(tot > 0)) continue;
+      let c = 0; for (const [v, w] of A) { c += w; if (c >= tot / 2) { evid.set(kOf[j], v); break; } }
+    }
+    // 5. the pins: from the first bar line in the track to the last, each stretch as long as its straight line keeps
+    // every beat within 4 ms of the curve
+    const Sk = k => { const i = k - kLo2; if (i >= 0 && i < nC) return cv[i]; return i < 0 ? cv[0] + i * s0 : cv[nC - 1] + (i - nC + 1) * s1; };
+    // (the first pin on the first beat in the track, the last on the last: before and after them a grid of pins goes on
+    // at its mean tempo, which a band's tempo there may not be; the ones between on bar lines)
+    let kb0 = kLo2; while (Sk(kb0) < 0) kb0++; while (Sk(kb0 - 1) >= 0) kb0--;
+    let kb1 = kHi2; while (Sk(kb1) > dur) kb1--; while (Sk(kb1 + 1) <= dur) kb1++;
+    const knots = [kb0];
+    for (let ka = kb0; ka < kb1;) {
+      let ok = Math.min(kb1, 4 * Math.floor(ka / 4) + 4);
+      for (let kb = ok; kb <= kb1; kb = kb + 4 > kb1 && kb < kb1 ? kb1 : kb + 4) {
+        const ta = Sk(ka), sl = (Sk(kb) - ta) / (kb - ka);
+        let good = true;
+        for (let k = ka + 1; k < kb; k++) if (Math.abs(ta + sl * (k - ka) - Sk(k)) > LIVE_TOL) { good = false; break; }
+        if (!good) break;
+        ok = kb;
+      }
+      knots.push(Math.min(ok, kb1)); ka = Math.min(ok, kb1);
+    }
+    const pins = knots.map(k => [Sk(k), k]);
+    const Pm = (pins[pins.length - 1][0] - pins[0][0]) / (pins[pins.length - 1][1] - pins[0][1]);
+    const map = beatMap(pins, Pm);
+    let ss = 0, n = 0;
+    for (const o of obs) if (o.r > 0 && sure[o.j]) { const e = o.t - off[o.f] - map.timeAt(kOf[o.j]); ss += e * e * o.w; n += o.w; }
+    return { pins, map, obs: js.map(j => [kOf[j], S[j]]), P: Pm, row, on: js.length / nK, rms: n ? Math.sqrt(ss / n) * 1000 : 0, segs: pins.length - 1, live: true,
+      doubt: doubtK, evid, off: off.map(x => Math.round(x * 1e4) / 10), fw: fw.map(x => Math.round(x * 100) / 100), sure: js.length, H, curve: Sk, nres };
+  }
+  // How well a grid (s -> its beat number) sits on the evidence: over every 16 beats the middle of the distances from the
+  // beats' kicks to the grid's nearest line; the worst of those (ms). A grid that loses the beat somewhere shows there.
+  function evidErr(evid, beatAt) {
+    const ks = [...evid.keys()].sort((a, b) => a - b), win = [];
+    const d = t => { const u = beatAt(t), k = Math.round(u), u1 = beatAt(t + 0.001); return Math.abs(u - k) / Math.max(1e-6, (u1 - u) / 0.001); };
+    if (!ks.length) return 0;
+    // (16 beats in a row, 4 of them with their kick at least: a one-drop has one a bar)
+    for (let k0 = ks[0], i = 0; k0 <= ks[ks.length - 1]; k0 += 8) {
+      while (i < ks.length && ks[i] < k0) i++;
+      const e = []; for (let q = i; q < ks.length && ks[q] < k0 + 16; q++) e.push(d(evid.get(ks[q])));
+      if (e.length < 4) continue;
+      e.sort((a, b) => a - b); win.push(e[e.length >> 1]);
+    }
+    win.sort((a, b) => a - b);
+    return win.length ? win[win.length - 1] * 1000 : 0;
+  }
+
   function analyzeGrid(peaks, hits, opts = {}) {
     if (!hits || !hits.data || hits.rate !== HIT_RATE || !peaks || !peaks.data || hits.n < 8 * HIT_RATE) return null;
     const dur = hits.n / HIT_RATE, none = code => ({ v: GRID_V, bpm: null, ok: false, why: [{ code }], notes: [], sections: [] });
@@ -412,7 +917,15 @@
       return { row, ks: got.ks, ts: got.ts, fit: got.fit, on: on / got.ks.length, kicks: got.fit.m / (got.ks[got.ks.length - 1] - got.ks[0] + 1), rms: Math.sqrt(ss / got.fit.m) * 1000 };
     };
     const lines = [lineOf(1), lineOf(0)].filter(Boolean);
-    if (!lines.length) return { ...none('few'), bpm: Math.round(60 / P * 100) / 100 };
+    // (no straight line holds even around the seed: a tempo wandering fast (a turntable, a tape). The beats followed
+    // from the seed's own kick instead, stage 5; when they can't be either, said so)
+    let bent = null;
+    if (!lines.length) {
+      { const i = near(ev.Kt, a, 0.015), t = i >= 0 ? hitStart(hits, ev.Kt[i], 1, 0.012) : null; bent = bendOf(hits, 1, ev, 0, t != null ? t : a, P, kLo, kHi, dur); }
+      if (!bent) return { ...none('few'), bpm: Math.round(60 / P * 100) / 100 };
+      const ks = bent.obs.map(o => o[0]), ts = bent.obs.map(o => o[1]);
+      lines.push({ row: bent.row, ks, ts, fit: { slope: bent.P, icpt: bent.map.timeAt(0), m: ks.length }, on: bent.on, kicks: ks.length / (ks[ks.length - 1] - ks[0] + 1), rms: bent.rms });
+    }
     const L = lines.sort((x, y) => (y.kicks - 0.15 * y.rms) - (x.kicks - 0.15 * x.rms))[0];
     let period = L.fit.slope, icpt = L.fit.icpt;
 
@@ -448,6 +961,61 @@
         if (!jump) { const mean = 60 / (pick.bpm / mul), ks = kSeedOf(icpt, period, seed); icpt += ks * (period - mean); period = mean; }
       }
     }
+    // -- 4b. pins where the line doesn't hold (stage 5): the beats followed out from the seed window, where the line
+    // is known, and the fewest pins that hold them within 2 ms. The grid is then those pins (its BPM their mean);
+    // the 1 and the sections are found on it. Not done when they can't be followed over most of the drums.
+    if (drift && !bent) {
+      // (from a kick on the line nearest the seed window's middle: one of the line's own hits, where it holds)
+      const km = kSeedOf(icpt, period, seed);
+      let k0 = km, t0 = null, bd = 1e9;
+      for (let i = 0; i < L.ks.length; i++) {
+        if (Math.abs(L.ts[i] - (L.fit.icpt + L.fit.slope * L.ks[i])) > 0.002 || Math.abs(L.ks[i] - km) >= bd) continue;
+        const j = near(ev.Kt, L.ts[i], 0.004);
+        if (j >= 0 && ev.kw[j] >= 0.36) { bd = Math.abs(L.ks[i] - km); k0 = L.ks[i]; t0 = L.ts[i]; }
+      }
+      if (t0 != null) bent = bendOf(hits, L.row, ev, k0, t0, L.fit.slope, kLo - 8, kHi + 8, dur);
+      // (the beats followed all on the straight line after all, within 3 ms: the tempo is constant, the windows were
+      // wrong. The line, unmarked)
+      if (bent) {
+        let on = 0;
+        for (const [k, t] of bent.obs) if (Math.abs(t - (L.fit.icpt + L.fit.slope * k)) <= 0.003) on++;
+        if (on >= 0.97 * bent.obs.length) {
+          bent = null; drift = null; parts = null; period = L.fit.slope; icpt = L.fit.icpt;
+          why.splice(why.findIndex(w => w.code === 'drift' || w.code === 'jump'), 1);
+        }
+      }
+    } else if (bent && !drift) {
+      drift = { kind: 'wander', at: null, windows: 0 };
+      why.push({ code: 'drift', at: null, parts });
+    }
+    // -- 4c. a band's tempo (stage 6a): the beat path through all the drums, its smooth curve, its pins. Taken when it
+    // sits on the drums' own beats clearly better than the line (or stage 5's pins) does: a steady track keeps its line
+    // (not tried where the line holds tightly, most of its beats' hits within 2 ms of it: no band plays that steadily)
+    let live = null, liveDoubt = null;
+    if (!opts.noLive && (drift || bent || L.on < 0.6)) {
+      // (from the seed window's own grid, right there to a few ms: a kick beat, numbered 0 as the line's beats are)
+      // (each window's own grid, where it reads this tempo well: in our beats, a half-time reading counted double)
+      const mul = Pp / P, prior = pick.list.filter(c => c.score >= 0.3 * seed.score).map(c => [c.t0, c.t1, c.a + c.even * c.P, c.P / mul]);
+      const lv = liveOf(hits, ev, L.row, 0, a, P, dur, seed.t0, seed.t1, prior);
+      if (lv) {
+        // (where the drums give too little to follow: said whichever grid is kept, a band's or stage 5's)
+        if (lv.doubt.length) liveDoubt = lv.doubt.map(([a0, b0]) => ({ t0: lv.map.timeAt(a0), t1: lv.map.timeAt(b0), why: 'drums' }));
+        const eL = evidErr(lv.evid, bent ? bent.map.beatAt : t => (t - icpt) / period), eV = evidErr(lv.evid, lv.map.beatAt);
+        // (how far the curve goes from the straight line at all, its own offset aside)
+        const dev = lv.obs.map(([k, t]) => { const u = (t - L.fit.icpt) / L.fit.slope; return (u - Math.round(u)) * L.fit.slope; }).sort((x, y) => x - y), md = dev[dev.length >> 1];
+        const far = Math.max(Math.abs(dev[0] - md), Math.abs(dev[dev.length - 1] - md)) * 1000;
+        if (opts.debug) live = { nres: lv.nres, evid: lv.evid, eLine: eL, eLive: eV, far, pins: lv.pins.length, doubt: lv.doubt.length, off: lv.off, fw: lv.fw, sure: lv.sure, H: lv.H, used: false, curve: lv.curve };
+        // (the line stays while it is within 6 ms of the drums everywhere: a steady track, or a band so tight that
+        // following it changes nothing)
+        if ((drift || bent || far > 3) && eV + 1 < eL && (bent || eL > 6)) {
+          if (live) live.used = true;
+          if (!drift) { drift = { kind: 'live', at: null, windows: 0 }; why.push({ code: 'drift', at: null, parts }); }
+          drift.kind = drift.kind === 'jump' ? 'live' : drift.kind;
+          bent = lv;
+        }
+      }
+    }
+    if (bent) { period = bent.P; icpt = bent.map.timeAt(0); }
 
     // -- 5. the whole-number lock
     let whole = false;
@@ -462,13 +1030,15 @@
       }
       if (!whole) notes.push({ code: 'nonwhole', bpm: Math.round(fitBpm * 100) / 100 });
     }
-    // the beats: beat k (as counted from the seed) at beatT(k); on the line when the tempo is constant
-    const beatT = k => icpt + k * period;
+    // the beats: beat k (as counted from the seed) at beatT(k); on the line when the tempo is constant, on the
+    // pins when it wanders
+    const beatT = bent ? bent.map.timeAt : k => icpt + k * period;
+    const kA = bent ? Math.ceil(bent.map.beatAt(0)) - 2 : kLo, kB = bent ? Math.floor(bent.map.beatAt(dur)) + 2 : kHi;
 
     // -- 6. the 1
-    const one = findOne(ev, peaks, opts.bass, beatT, kLo, kHi);
-    const t0 = icpt - Math.floor(icpt / period) * period;
-    const bar0 = icpt + one.k1 * period;
+    const one = findOne(ev, peaks, opts.bass, beatT, kA, kB);
+    const bar0 = beatT(one.k1);
+    const t0 = bar0 - Math.floor(bar0 / period) * period;
 
     // -- 7. trust
     if (margin < 1.15 && second) why.push({ code: 'tempo2', bpm: Math.round(second.bpm * 10) / 10 });
@@ -480,16 +1050,34 @@
     if (L.fit.m < 24) why.push({ code: 'few', n: L.fit.m });
     if (!drift && (L.rms > 1.5 || L.on < 0.5)) why.push({ code: 'loose', ms: Math.round(L.rms * 10) / 10, on: Math.round(L.on * 100) });
     if (!one.ok) why.push({ code: 'one', by: one.by });
+    // (pinned: the grid follows the tempo now; said so, the pins to be looked at once, in place of "drifts")
+    if (bent && !bent.live) {
+      const i = why.findIndex(w => w.code === 'drift' || w.code === 'jump');
+      const w = { code: 'pins', n: bent.pins.length, kind: drift.kind, at: drift.at, parts };
+      if (i >= 0) why[i] = w; else why.push(w);
+    }
+    // (a band's tempo followed: not to check for that; only where it is doubtful, each such stretch, and a note)
+    if (bent && bent.live) {
+      const i = why.findIndex(w => w.code === 'drift' || w.code === 'jump');
+      if (i >= 0) why.splice(i, 1);
+      const f = why.findIndex(w => w.code === 'few'); if (f >= 0 && bent.sure >= 24) why.splice(f, 1);
+      notes.push({ code: 'live', n: bent.pins.length });
+      if (bent.doubt.length) why.push({ code: 'doubt', n: bent.doubt.length, at: bent.map.timeAt(bent.doubt[0][0]) });
+    }
     const conf = { kicks: Math.round(L.kicks * 1000) / 1000, rms: Math.round(L.rms * 100) / 100, row: L.row, on: Math.round(L.on * 1000) / 1000, n: L.fit.m,
       margin: Math.round(Math.min(9, margin) * 100) / 100, agree: voters ? Math.round(agree / voters * 100) / 100 : null, score: Math.round(raw.agg * 100) / 100, bar: one.conf };
     const out = { v: GRID_V, bpm: 60 / period, period, t0, bar0, whole, exact: true, ok: !why.length, why, notes, conf, drift, parts,
       families: { kicks: ev.kicks, snares: ev.snares, hats: ev.hats }, sections: [] };
+    // (the pins, their beats counted from the 1: the bar lines where b is a multiple of 4)
+    if (bent) out.pins = bent.pins.map(([t, k]) => [t, k - one.k1]);
+    // (stage 6a: where the drums give too little to follow the band, from a beat to a beat: s)
+    if (bent && liveDoubt) out.doubt = liveDoubt;
     // -- 8. the structure: the sections, the phrase grid, the cue (on the grid just found)
-    const st = analyzeStructure(ev, peaks, hits, bar0, period, dur, opts.debug, one.ok, out.ok);
+    const st = analyzeStructure(ev, peaks, hits, bar0, period, dur, opts.debug, one.ok, out.ok, bent ? b => beatT(b + one.k1) : null);
     if (st) { out.sections = st.sections; out.cue = st.cue; out.phrase = st.phrase; if (opts.structure) out.structure = st; }
     // (for the test bench's close look: what was weighed)
     if (opts.debug) out.dbg = { clusters: clusters.map(c => ({ bpm: c.bpm, agg: c.agg, cK: c.cK, c: c.c, alt: c.alt, n: c.list.length })), seed: { bpm: seed.bpm, a: seed.a, t0: seed.t0, score: seed.score, c: seed.c, e: seed.e, alt: seed.alt, even: seed.even },
-      lines: lines.map(l => ({ row: l.row, n: l.ks.length, m: l.fit.m, rms: l.rms, kicks: l.kicks, on: l.on })) };
+      lines: lines.map(l => ({ row: l.row, n: l.ks.length, m: l.fit.m, rms: l.rms, kicks: l.kicks, on: l.on })), live };
     return out;
   }
 
@@ -508,11 +1096,22 @@
   //   fit, the first kick. With the phrase grid unsure, two more candidates (from the next best counts).
   // -> { sections: [{ t, k, c }], phrase: { o, conf }, cue: { t, ok, why, alts: [t] }, bars: n } or null
   const SEC_NAMES = ['intro', 'kicks', 'main', 'break', 'drop', 'outro'];
-  function analyzeStructure(ev, peaks, hits, one, period, dur, debug, oneOk, gridOk) {
-    // (bar 0 here: the first bar line at or after 0:00)
-    const B = 4 * period, bar0 = one - Math.floor(one / B + 1e-9) * B, n = Math.floor((dur - bar0) / B + 1e-6);
+  // noBeat: found on a grid the beat analysis didn't give (it found no steady beat: the track's older grid, a BPM
+  // typed, yours): what plays is then told by the low end's level, not by kicks (the low hits of a track without
+  // drums are its bass's notes)
+  function analyzeStructure(ev, peaks, hits, one, period, dur, debug, oneOk, gridOk, beatTime, noBeat) {
+    // (bar 0 here: the first bar line at or after 0:00; on a grid of pins (beatTime: beat b from the 1 -> s), its
+    // bar lines, each bar cut in sixteenths of its own length's average)
+    const B = 4 * period;
+    let bar0 = one - Math.floor(one / B + 1e-9) * B, n = Math.floor((dur - bar0) / B + 1e-6), bt = k => bar0 + k * B;
+    if (beatTime) {
+      let m0 = Math.ceil(-(one / B)) - 2;
+      while (beatTime(4 * m0) < -1e-9) m0++;
+      bt = k => beatTime(4 * (m0 + k)); bar0 = bt(0);
+      n = 0; while (bt(n + 1) <= dur + 1e-6) n++;
+    }
     if (!(period > 0) || n < 16) return null;
-    const bt = k => bar0 + k * B, pd = peaks.data, pn = peaks.n;
+    const pd = peaks.data, pn = peaks.n;
     const count = (T, W, thr, a, b) => { let c = 0; for (let i = lower(T, a); i < T.length && T[i] < b; i++) if (W[i] >= thr) c++; return c; };
     const K = new Float32Array(n), S = new Float32Array(n), H = new Float32Array(n), E = [0, 1, 2, 3].map(() => new Float32Array(n));
     const down = new Uint8Array(n), grid = new Uint8Array(n), hitsOn = new Float32Array(n), comb = new Float32Array(n), env = [];
@@ -576,7 +1175,10 @@
     const kAt = k => k >= 0 && k < n ? K[k] : 0;
     // (a section's fullness: its level, its hats, its low end; an outro under 90 % of the section before it)
     const OR = 0.9, LV = k => En[0][k] + Math.min(1, H[k]) + En[1][k];
-    const drums = k => K[k] >= 0.45 || (K[k] + S[k] >= 0.5 && Math.max(K[k], kAt(k - 1), kAt(k + 1)) >= 0.2);
+    // (no beat: a bar is full when its bass (the waveform's low band) is up from the track's quiet bars towards its loud
+    // ones, by a third of the way or more; a track whose bass hardly changes is full all through)
+    const lowAt = noBeat ? (() => { const a = Array.from(En[1]), p10 = pct(a, 0.1), p90 = pct(a, 0.9); return p90 - p10 < 0.25 ? -1 : p10 + 0.35 * (p90 - p10); })() : 0;
+    const drums = noBeat ? k => En[1][k] >= lowAt : k => K[k] >= 0.45 || (K[k] + S[k] >= 0.5 && Math.max(K[k], kAt(k - 1), kAt(k + 1)) >= 0.2);
     // -- the changes
     const F = k => [2 * Math.min(1, K[k]), Math.min(1, S[k]), Math.min(1, H[k]), En[0][k], En[1][k], En[2][k], En[3][k]];
     const Fk = []; for (let k = 0; k < n; k++) Fk.push(F(k));
@@ -610,7 +1212,7 @@
     }
     // -- the drums come in: the first bar of four with drums, its 1 struck (a pickup's bar has drums only after it)
     let P = -1;
-    for (let k = 0; k + 3 < n; k++) if (drums(k) && K[k] >= 0.2 && drums(k + 1) && drums(k + 2) && drums(k + 3)) { P = k; break; }
+    for (let k = 0; k + 3 < n; k++) if (drums(k) && (noBeat || K[k] >= 0.2) && drums(k + 1) && drums(k + 2) && drums(k + 3)) { P = k; break; }
     // (a pickup: the bar has its drums after its 1 only, fewer than the next bar's)
     if (P >= 0 && P + 1 < n && !down[P] && down[P + 1] && K[P] + S[P] < 0.8 * (K[P + 1] + S[P + 1])) P++;
     if (P < 0) P = 0;
@@ -636,7 +1238,7 @@
     for (let i = 0; i < sections.length; i++) {
       const x = sections[i];
       if (!x.drums) x.k = seen ? 'break' : 'intro';
-      else if (!seen) x.k = i === 0 ? 'main' : 'kicks';
+      else if (!seen) x.k = i === 0 || noBeat ? 'main' : 'kicks';   // (no beat: the low end comes in, not kicks)
       else x.k = afterBreak ? 'drop' : 'main';
       if (x.drums) seen = true;
       afterBreak = !x.drums && seen;
@@ -653,14 +1255,15 @@
     // sections)
     for (let i = sections.length - 1; i > 0; i--) {
       const x = sections[i], y = sections[i - 1];
-      if (x.k === y.k && (x.k === 'intro' || x.k === 'break' || x.k === 'outro')) { y.b = x.b; sections.splice(i, 1); }
+      // (no beat: nor two of a kind a bar or two apart, the same change seen twice on a grid between its bars)
+      if (x.k === y.k && (x.k === 'intro' || x.k === 'break' || x.k === 'outro' || (noBeat && y.b - y.a <= 2))) { y.b = x.b; sections.splice(i, 1); }
     }
     // -- the cue: from the drums' start, back as far as the grid holds the music (never into a free intro)
     // (one bar off the grid alone, a fill, a break of a bar, doesn't end it: two in a row do)
     let low = P;
     while (low > 0 && (grid[low - 1] || (low > 1 && grid[low - 2]))) low -= grid[low - 1] ? 1 : 2;
     const cueBar = from => { let c = from, went = false; for (const step of [64, 32, 16, 8, 4]) while (c - step >= low) { c -= step; went = true; } return { c, went }; };
-    const firstKick = () => { const i = ev.Kt.findIndex((t, j) => ev.kw[j] >= 0.36 && t >= bt(low) - 0.03); return i >= 0 ? ev.Kt[i] : bt(P); };
+    const firstKick = () => { if (noBeat) return bt(P); const i = ev.Kt.findIndex((t, j) => ev.kw[j] >= 0.36 && t >= bt(low) - 0.03); return i >= 0 ? ev.Kt[i] : bt(P); };
     const cueOf = from => { const r = cueBar(from); return !r.went && from - low >= 1 ? firstKick() : bt(r.c); };
     const why = [];
     if (conf < 1.3 && peaksAt.length >= 2) why.push('phrase');
@@ -843,6 +1446,9 @@
       case 'loose': return `its hits sit loosely on the grid (${r.ms} ms; ${r.on} % on it)`;
       case 'drift': return `the tempo is not constant${r.parts && r.parts[0] && r.parts[2] ? ` (${r.parts[0]} BPM at the start, ${r.parts[2]} at the end)` : ''}${r.at != null ? `: the grid holds only to about ${mmss(r.at)}` : ''}`;
       case 'jump': return `the grid does not hold for the whole track${r.at != null ? `: it slips around ${mmss(r.at)}` : ''}`;
+      case 'pins': return `${r.kind === 'jump' ? `the grid slips${r.at != null ? ` (around ${mmss(r.at)})` : ''}` : `the tempo wanders${r.parts && r.parts[0] && r.parts[2] ? ` (${r.parts[0]} BPM at the start, ${r.parts[2]} at the end)` : ''}`}: ${r.n} pins placed to follow it, to look at once`;
+      case 'doubt': return `the drums give too little to follow the band in ${r.n === 1 ? 'one place' : r.n + ' places'}${r.at != null ? ` (the first at ${mmss(r.at)})` : ''}: the grid is drawn straight across, to look at`;
+      case 'live': return `played by a band: the grid follows its tempo with ${r.n} pins`;
       case 'one': return r.by === 'first' ? 'which beat is the 1 is a guess (the first kick)' : 'which beat is the 1 is not sure (its clues are weak or disagree)';
       case 'nonwhole': return `the tempo is not a whole number (${r.bpm}): a vinyl rip or played by hand`;
       case 'halftime': return 'half-time (the kick on 1, the snare on 3), counted double';
@@ -856,8 +1462,20 @@
   function structRecord(g) {
     const r3 = x => Math.round(x * 1000) / 1000, out = {};
     if (g && Array.isArray(g.sections) && g.sections.length) out.sec = g.sections.map(x => ({ t: r3(x.t), k: x.k, c: x.c }));
+    // (stage 5: a grid that follows a wandering tempo, its pins [t s, beat from the 1])
+    if (g && Array.isArray(g.pins) && g.pins.length > 1) out.pins = g.pins.map(([t, b]) => [Math.round(t * 1e6) / 1e6, Math.round(b * 1e6) / 1e6]);
+    // (stage 6a: where a band's grid is doubtful, [t0, t1] s)
+    if (g && Array.isArray(g.doubt) && g.doubt.length) out.doubt = g.doubt.map(d => [r3(d.t0), r3(d.t1)]);
     if (g && g.cue && typeof g.cue.t === 'number') out.cue = { t: r3(g.cue.t), ok: g.cue.ok ? 1 : 0, why: g.cue.why || [], alts: (g.cue.alts || []).map(r3), ...(typeof g.cue.low === "number" ? { low: r3(g.cue.low) } : {}) };
     return out;
   }
-  return { GRID_V, analyzeGrid, bassBand, bassNotes, findEvents, hitStart, reasonText, structRecord, SEC_NAMES };
+  // The sections and the cue on a grid given, for a track the beat analysis found no steady beat in (the grid the
+  // track has anyway: its older automatic one, a BPM typed, yours). grid: { one: a bar line (s), period (s),
+  // beatTime?: beat b from that bar line -> s, for a grid of pins }. -> the record's { sec, cue } (the cue unsure), or {}
+  function structureOn(peaks, hits, grid) {
+    if (!hits || !hits.data || hits.rate !== HIT_RATE || !peaks || !peaks.data || !grid || !(grid.period > 0) || !isFinite(grid.one)) return {};
+    const st = analyzeStructure(findEvents(hits, peaks), peaks, hits, grid.one, grid.period, hits.n / HIT_RATE, false, false, false, grid.beatTime || null, true);
+    return st ? structRecord(st) : {};
+  }
+  return { GRID_V, analyzeGrid, bassBand, bassNotes, findEvents, hitStart, reasonText, structRecord, structureOn, SEC_NAMES };
 });
